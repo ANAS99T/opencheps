@@ -2,7 +2,6 @@ package com.opencheps.overlay;
 
 import android.annotation.SuppressLint;
 import android.content.Context;
-import android.content.Intent;
 import android.graphics.PixelFormat;
 import android.os.Build;
 import android.view.Gravity;
@@ -14,7 +13,6 @@ import android.widget.ImageButton;
 import android.widget.TextView;
 
 import com.opencheps.R;
-import com.opencheps.capture.ScreenCaptureService;
 
 public class FloatingPanel {
 
@@ -25,10 +23,12 @@ public class FloatingPanel {
     private TextView statusTv, evalTv;
     private ImageButton toggleBtn;
     private boolean paused = false;
+    private int screenW, screenH;
 
     public interface Listener {
         void onPauseToggle(boolean paused);
         void onStop();
+        void onRecalibrate();
     }
     private Listener listener;
 
@@ -46,7 +46,8 @@ public class FloatingPanel {
         statusTv  = root.findViewById(R.id.panelStatus);
         evalTv    = root.findViewById(R.id.panelEval);
         toggleBtn = root.findViewById(R.id.panelToggle);
-        ImageButton stopBtn = root.findViewById(R.id.panelStop);
+        ImageButton stopBtn  = root.findViewById(R.id.panelStop);
+        ImageButton recalBtn = root.findViewById(R.id.panelRecal);
 
         toggleBtn.setOnClickListener(v -> {
             paused = !paused;
@@ -57,9 +58,9 @@ public class FloatingPanel {
         });
         stopBtn.setOnClickListener(v -> {
             if (listener != null) listener.onStop();
-            Intent stop = new Intent(ctx, ScreenCaptureService.class)
-                    .setAction(ScreenCaptureService.ACTION_STOP);
-            ctx.startService(stop);
+        });
+        recalBtn.setOnClickListener(v -> {
+            if (listener != null) listener.onRecalibrate();
         });
 
         int type = Build.VERSION.SDK_INT >= 26
@@ -70,25 +71,31 @@ public class FloatingPanel {
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 type,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT);
         lp.gravity = Gravity.TOP | Gravity.START;
-        lp.x = 40;
-        lp.y = 120;
+        lp.x = 20;
+        lp.y = 80;
 
         root.setOnTouchListener(new View.OnTouchListener() {
-            float dx, dy; int sx, sy;
+            float dx, dy; int sx, sy; long downAt;
             @Override public boolean onTouch(View v, MotionEvent e) {
                 switch (e.getActionMasked()) {
                     case MotionEvent.ACTION_DOWN:
                         dx = e.getRawX(); dy = e.getRawY();
                         sx = lp.x; sy = lp.y;
-                        return true;
+                        downAt = System.currentTimeMillis();
+                        return false;
                     case MotionEvent.ACTION_MOVE:
-                        lp.x = sx + (int) (e.getRawX() - dx);
-                        lp.y = sy + (int) (e.getRawY() - dy);
-                        try { wm.updateViewLayout(root, lp); } catch (Exception ignored) {}
-                        return true;
+                        int nx = sx + (int) (e.getRawX() - dx);
+                        int ny = sy + (int) (e.getRawY() - dy);
+                        if (Math.hypot(e.getRawX() - dx, e.getRawY() - dy) > 12) {
+                            lp.x = nx; lp.y = ny;
+                            try { wm.updateViewLayout(root, lp); } catch (Exception ignored) {}
+                            return true;
+                        }
+                        return false;
                     default:
                         return false;
                 }
@@ -96,6 +103,19 @@ public class FloatingPanel {
         });
 
         try { wm.addView(root, lp); } catch (Exception ignored) {}
+    }
+
+    public void placeBottomLeft(int screenWidth, int screenHeight) {
+        this.screenW = screenWidth;
+        this.screenH = screenHeight;
+        if (root == null || lp == null) return;
+        root.post(() -> {
+            int h = root.getHeight();
+            if (h <= 0) h = 140;
+            lp.x = 16;
+            lp.y = Math.max(40, screenHeight - h - 160);
+            try { wm.updateViewLayout(root, lp); } catch (Exception ignored) {}
+        });
     }
 
     public boolean isPaused() { return paused; }

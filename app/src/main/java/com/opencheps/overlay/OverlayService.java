@@ -1,7 +1,6 @@
 package com.opencheps.overlay;
 
 import android.app.Service;
-import android.content.Context;
 import android.content.Intent;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
@@ -69,6 +68,10 @@ public class OverlayService extends Service {
         if (instance == null) return;
         instance.arrows.setBoardBounds(bounds);
         instance.arrows.setArrows(a);
+    }
+
+    public static void setBoardBounds(Rect bounds) {
+        if (instance != null) instance.arrows.setBoardBounds(bounds);
     }
 
     public static void clearOverlays() {

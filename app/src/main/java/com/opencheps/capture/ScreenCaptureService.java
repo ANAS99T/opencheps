@@ -53,6 +53,7 @@ public class ScreenCaptureService extends Service {
 
     private static final int[]   ARROW_COLORS = { 0xFF00C853, 0xFFFFB300, 0xFF29B6F6 };
     private static final float[] ARROW_WIDTHS = { 18f, 13f, 10f };
+    private static final long    SAMPLE_PERIOD_MS = 700;
 
     private MediaProjection projection;
     private VirtualDisplay   virtualDisplay;
@@ -61,16 +62,19 @@ public class ScreenCaptureService extends Service {
     private Handler          worker;
 
     private StockfishEngine  engine;
-    private BoardDetector.Board boardCache;
+    private boolean engineReady;
     private PieceClassifier  classifier;
 
-    private int width, height, density;
-    private float captureScaleInverse = 1f;
+    private int captureW, captureH, density;
+    private int screenW, screenH;
+    private float capToScreenX = 1f, capToScreenY = 1f;
     private volatile boolean busy = false;
     private volatile boolean paused = false;
+
     private String lastFen = "";
     private Side  lastDetectedStm = null;
     private int   lastMaterial = Integer.MIN_VALUE;
+    private int   noBoardCount = 0;
 
     @Nullable @Override public IBinder onBind(Intent i) { return null; }
 
@@ -97,7 +101,7 @@ public class ScreenCaptureService extends Service {
             @Override public void onStop() { stopSelf(); }
         }, null);
 
-        workerThread = new HandlerThread("oc-worker");
+        workerThread = new HandlerThread("oc-worker", Thread.NORM_PRIORITY);
         workerThread.start();
         worker = new Handler(workerThread.getLooper());
 
@@ -105,8 +109,11 @@ public class ScreenCaptureService extends Service {
         classifier = new PieceClassifier();
 
         worker.post(() -> {
-            try { engine.start(getApplicationContext()); }
-            catch (Exception e) {
+            try {
+                engine.start(getApplicationContext());
+                engineReady = true;
+                panelStatus("Engine ready • searching for board");
+            } catch (Exception e) {
                 Log.e(TAG, "engine start failed", e);
                 panelStatus("Engine error: " + e.getMessage());
             }
@@ -115,7 +122,7 @@ public class ScreenCaptureService extends Service {
         setupVirtualDisplay();
         wirePanel();
         worker.postDelayed(sampleLoop, 1200);
-        panelStatus("Searching for board…");
+        panelStatus("Starting…");
         return START_STICKY;
     }
 
@@ -123,6 +130,7 @@ public class ScreenCaptureService extends Service {
         new Handler(getMainLooper()).postDelayed(() -> {
             FloatingPanel p = OverlayService.panel();
             if (p != null) {
+                p.placeBottomLeft(screenW, screenH);
                 p.setListener(new FloatingPanel.Listener() {
                     @Override public void onPauseToggle(boolean isPaused) {
                         paused = isPaused;
@@ -130,54 +138,76 @@ public class ScreenCaptureService extends Service {
                             OverlayService.clearOverlays();
                             panelStatus("Paused");
                         } else {
+                            lastFen = "";
                             panelStatus("Resumed");
                         }
                     }
                     @Override public void onStop() { stopSelf(); }
+                    @Override public void onRecalibrate() {
+                        classifier.reset();
+                        lastFen = "";
+                        lastMaterial = Integer.MIN_VALUE;
+                        lastDetectedStm = null;
+                        panelStatus("Re-calibrating — show starting position");
+                    }
                 });
             }
-        }, 300);
+        }, 400);
     }
 
     private final Runnable sampleLoop = new Runnable() {
         @Override public void run() {
             try { if (!paused) sampleOnce(); }
             catch (Throwable t) { Log.e(TAG, "sample error", t); }
-            if (worker != null) worker.postDelayed(this, 900);
+            if (worker != null) worker.postDelayed(this, SAMPLE_PERIOD_MS);
         }
     };
 
     private void sampleOnce() {
         if (busy || reader == null) return;
-        Image img = reader.acquireLatestImage();
+        Image img = null;
+        try {
+            img = reader.acquireLatestImage();
+        } catch (Exception e) {
+            return;
+        }
         if (img == null) return;
         busy = true;
+        Bitmap bmp = null;
         try {
-            Bitmap bmp = imageToBitmap(img);
+            bmp = imageToBitmap(img);
             img.close();
+            img = null;
 
             BoardDetector.Board board = BoardDetector.locate(bmp);
             if (board == null) {
-                panelStatus("Searching for board…");
-                bmp.recycle();
+                noBoardCount++;
+                if (noBoardCount == 1 || noBoardCount % 5 == 0) {
+                    panelStatus("Looking for board… (" + noBoardCount + ")");
+                }
+                OverlayService.clearOverlays();
                 return;
             }
-            boardCache = board;
+            noBoardCount = 0;
+
+            Rect screenBoardBounds = boardBoundsOnScreen(board);
+            OverlayService.setBoardBounds(screenBoardBounds);
+
+            if (!engineReady) {
+                panelStatus("Board found • waiting for engine");
+                return;
+            }
 
             if (!classifier.isTrained()) {
                 boolean ok = classifier.tryBootstrap(bmp, board);
                 if (!ok) {
-                    panelStatus("Board found — open starting position to calibrate");
-                    drawBoardBoundsOnly(board);
-                    bmp.recycle();
+                    panelStatus("Board found — show STARTING position to calibrate");
                     return;
                 }
-                panelStatus("Calibrated: " + classifier.bootstrapSide()
-                        + " POV. Engine watching…");
+                panelStatus("Calibrated as " + classifier.bootstrapSide() + " POV");
             }
 
             char[][] grid = classifier.classifyBoard(bmp, board);
-            bmp.recycle();
             if (grid == null) return;
 
             int material = FenBuilder.materialDiff(grid);
@@ -185,8 +215,7 @@ public class ScreenCaptureService extends Service {
 
             String fen = FenBuilder.build(grid, classifier.bootstrapSide(), stm);
             if (fen == null) {
-                panelStatus("Position invalid (no kings) — retrying");
-                drawBoardBoundsOnly(board);
+                panelStatus("Position invalid — waiting for clean frame");
                 return;
             }
             if (fen.equals(lastFen)) return;
@@ -196,6 +225,8 @@ public class ScreenCaptureService extends Service {
 
             int think    = Prefs.thinkMs(getApplicationContext());
             int multiPv  = Math.max(1, Math.min(3, Prefs.multiPv(getApplicationContext())));
+
+            panelStatus("Thinking " + think + "ms (" + stm + " to move)");
             List<StockfishEngine.Pv> pvs = engine.topMoves(fen, think, multiPv);
             if (pvs.isEmpty()) {
                 panelStatus("Engine: no legal move");
@@ -205,15 +236,27 @@ public class ScreenCaptureService extends Service {
             renderArrows(pvs, board);
             StockfishEngine.Pv best = pvs.get(0);
             String evalStr = best.mate
-                    ? "M" + (best.cp > 0 ? (100000 - best.cp) : -(100000 + best.cp))
+                    ? "M" + Math.abs(plyToMate(best.cp))
                     : String.format("%+.2f", best.cp / 100.0);
-            panelEval(stm + " to move • " + best.uci + " (" + evalStr + ")");
+            panelEval(stm + " • " + formatUci(best.uci) + " (" + evalStr + ")");
             panelStatus("Engine ready");
         } catch (Exception e) {
-            Log.w(TAG, "loop iter failed: " + e.getMessage());
+            Log.w(TAG, "loop iter failed: " + e.getMessage(), e);
         } finally {
+            if (bmp != null && !bmp.isRecycled()) bmp.recycle();
+            if (img != null) try { img.close(); } catch (Exception ignored) {}
             busy = false;
         }
+    }
+
+    private int plyToMate(int cp) {
+        return cp > 0 ? 100000 - cp : -(100000 + cp);
+    }
+
+    private String formatUci(String uci) {
+        if (uci == null || uci.length() < 4) return uci == null ? "?" : uci;
+        return uci.substring(0, 2) + "→" + uci.substring(2, 4)
+                + (uci.length() > 4 ? "=" + Character.toUpperCase(uci.charAt(4)) : "");
     }
 
     private Side inferStm(int material) {
@@ -221,13 +264,26 @@ public class ScreenCaptureService extends Service {
         if (material == lastMaterial) {
             return lastDetectedStm == Side.WHITE ? Side.BLACK : Side.WHITE;
         }
-        if (material < lastMaterial) return Side.WHITE;
-        return Side.BLACK;
+        return material < lastMaterial ? Side.WHITE : Side.BLACK;
+    }
+
+    private Rect boardBoundsOnScreen(BoardDetector.Board board) {
+        return new Rect(
+                Math.round(board.left * capToScreenX),
+                Math.round(board.top  * capToScreenY),
+                Math.round((board.left + board.side) * capToScreenX),
+                Math.round((board.top  + board.side) * capToScreenY));
     }
 
     private void renderArrows(List<StockfishEngine.Pv> pvs, BoardDetector.Board board) {
         List<ArrowOverlayView.Arrow> out = new ArrayList<>();
         Side persp = classifier.bootstrapSide();
+        float cellScreen = board.square * ((capToScreenX + capToScreenY) * 0.5f);
+        float ox = board.left * capToScreenX;
+        float oy = board.top  * capToScreenY;
+        float cellX = (board.square * capToScreenX);
+        float cellY = (board.square * capToScreenY);
+
         for (int i = 0; i < pvs.size(); i++) {
             String uci = pvs.get(i).uci;
             if (uci == null || uci.length() < 4) continue;
@@ -236,33 +292,14 @@ public class ScreenCaptureService extends Service {
             if (persp == Side.BLACK) {
                 fx = 7 - fx; fy = 7 - fy; tx = 7 - tx; ty = 7 - ty;
             }
-            float cell = board.square * captureScaleInverse;
-            float ox = board.left * captureScaleInverse;
-            float oy = board.top  * captureScaleInverse;
-            float sx = ox + (fx + 0.5f) * cell, sy = oy + (fy + 0.5f) * cell;
-            float ex = ox + (tx + 0.5f) * cell, ey = oy + (ty + 0.5f) * cell;
+            float sx = ox + (fx + 0.5f) * cellX, sy = oy + (fy + 0.5f) * cellY;
+            float ex = ox + (tx + 0.5f) * cellX, ey = oy + (ty + 0.5f) * cellY;
             String lbl = (i == 0 ? "★ " : "") + uci;
+            float width = Math.max(8f, ARROW_WIDTHS[i] * Math.min(1.5f, cellScreen / 60f));
             out.add(new ArrowOverlayView.Arrow(
-                    sx, sy, ex, ey,
-                    ARROW_COLORS[i % ARROW_COLORS.length],
-                    ARROW_WIDTHS[i % ARROW_WIDTHS.length],
-                    lbl));
+                    sx, sy, ex, ey, ARROW_COLORS[i], width, lbl));
         }
-        Rect bounds = new Rect(
-                (int) (board.left * captureScaleInverse),
-                (int) (board.top  * captureScaleInverse),
-                (int) ((board.left + board.side) * captureScaleInverse),
-                (int) ((board.top  + board.side) * captureScaleInverse));
-        OverlayService.pushArrows(out, bounds);
-    }
-
-    private void drawBoardBoundsOnly(BoardDetector.Board board) {
-        Rect bounds = new Rect(
-                (int) (board.left * captureScaleInverse),
-                (int) (board.top  * captureScaleInverse),
-                (int) ((board.left + board.side) * captureScaleInverse),
-                (int) ((board.top  + board.side) * captureScaleInverse));
-        OverlayService.pushArrows(new ArrayList<>(), bounds);
+        OverlayService.pushArrows(out, boardBoundsOnScreen(board));
     }
 
     private void panelStatus(String s) {
@@ -279,16 +316,24 @@ public class ScreenCaptureService extends Service {
         DisplayMetrics dm = new DisplayMetrics();
         ((WindowManager) getSystemService(WINDOW_SERVICE))
                 .getDefaultDisplay().getRealMetrics(dm);
-        float maxEdge = Math.max(dm.widthPixels, dm.heightPixels);
-        float scale = Math.min(1f, 900f / maxEdge);
-        width   = Math.round(dm.widthPixels  * scale);
-        height  = Math.round(dm.heightPixels * scale);
-        density = dm.densityDpi;
-        captureScaleInverse = 1f / scale;
+        screenW = dm.widthPixels;
+        screenH = dm.heightPixels;
 
-        reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2);
+        float maxEdge = Math.max(screenW, screenH);
+        float scale = Math.min(1f, 720f / maxEdge);
+        captureW = Math.round(screenW * scale);
+        captureH = Math.round(screenH * scale);
+        density  = dm.densityDpi;
+        capToScreenX = (float) screenW / captureW;
+        capToScreenY = (float) screenH / captureH;
+
+        Log.i(TAG, "screen=" + screenW + "x" + screenH
+                + " capture=" + captureW + "x" + captureH
+                + " scale=" + capToScreenX);
+
+        reader = ImageReader.newInstance(captureW, captureH, PixelFormat.RGBA_8888, 2);
         virtualDisplay = projection.createVirtualDisplay(
-                "OpenChepsVD", width, height, density,
+                "OpenChepsVD", captureW, captureH, density,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 reader.getSurface(), null, worker);
     }
@@ -298,18 +343,20 @@ public class ScreenCaptureService extends Service {
         ByteBuffer buf = plane.getBuffer();
         int rowStride = plane.getRowStride();
         int pixelStride = plane.getPixelStride();
-        int rowPad = rowStride - pixelStride * image.getWidth();
-        Bitmap bmp = Bitmap.createBitmap(
-                image.getWidth() + rowPad / pixelStride,
-                image.getHeight(), Bitmap.Config.ARGB_8888);
-        bmp.copyPixelsFromBuffer(buf);
-        if (rowPad != 0) {
-            Bitmap cropped = Bitmap.createBitmap(bmp, 0, 0,
-                    image.getWidth(), image.getHeight());
-            bmp.recycle();
+        int w = image.getWidth();
+        int h = image.getHeight();
+        int rowPadding = rowStride - pixelStride * w;
+        int bitmapW = w + rowPadding / pixelStride;
+
+        Bitmap raw = Bitmap.createBitmap(bitmapW, h, Bitmap.Config.ARGB_8888);
+        buf.rewind();
+        raw.copyPixelsFromBuffer(buf);
+        if (bitmapW != w) {
+            Bitmap cropped = Bitmap.createBitmap(raw, 0, 0, w, h);
+            raw.recycle();
             return cropped;
         }
-        return bmp;
+        return raw;
     }
 
     private void startInForeground() {

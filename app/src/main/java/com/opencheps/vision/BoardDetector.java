@@ -1,85 +1,189 @@
 package com.opencheps.vision;
 
 import android.graphics.Bitmap;
-import android.graphics.Color;
+import android.util.Log;
 
 public class BoardDetector {
 
     public static class Board {
         public final int left, top, side;
         public final float square;
-        public Board(int left, int top, int side) {
+        public final double confidence;
+        public Board(int left, int top, int side, double confidence) {
             this.left = left; this.top = top; this.side = side;
             this.square = side / 8f;
+            this.confidence = confidence;
         }
     }
 
-    public static Board locate(Bitmap bmp) {
-        if (bmp == null) return null;
-        int W = bmp.getWidth(), H = bmp.getHeight();
-        int[] colEdges = projection(bmp, true);
-        int[] rowEdges = projection(bmp, false);
+    private static final String TAG = "OC/Detector";
+    private static final int WORK_MAX_EDGE = 360;
+    private static final double ACCEPT_THRESHOLD = 18.0;
 
-        int bestSide = -1, bestX = 0, bestY = 0;
-        double bestScore = -1;
-        int maxSide = Math.min(W, H);
-        for (int s = (int) (maxSide * 0.55); s <= maxSide * 0.98; s += Math.max(8, s / 30)) {
-            int[] colWin = strongestRun(colEdges, s);
-            int[] rowWin = strongestRun(rowEdges, s);
-            if (colWin == null || rowWin == null) continue;
-            double periodScore = periodicity(colEdges, colWin[0], s)
-                              + periodicity(rowEdges, rowWin[0], s);
-            if (periodScore > bestScore) {
-                bestScore = periodScore;
-                bestSide = s;
-                bestX = colWin[0];
-                bestY = rowWin[0];
+    public static Board locate(Bitmap src) {
+        if (src == null) return null;
+        long t0 = System.nanoTime();
+
+        int W0 = src.getWidth(), H0 = src.getHeight();
+        float scale = (float) WORK_MAX_EDGE / Math.max(W0, H0);
+        int W = Math.max(64, Math.round(W0 * scale));
+        int H = Math.max(64, Math.round(H0 * scale));
+
+        Bitmap work = (scale < 0.999f)
+                ? Bitmap.createScaledBitmap(src, W, H, true)
+                : src;
+
+        int[] argb = new int[W * H];
+        work.getPixels(argb, 0, W, 0, 0, W, H);
+        if (work != src) work.recycle();
+
+        int[] gray = new int[W * H];
+        for (int i = 0; i < gray.length; i++) {
+            int p = argb[i];
+            int r = (p >> 16) & 0xFF, g = (p >> 8) & 0xFF, b = p & 0xFF;
+            gray[i] = (r * 299 + g * 587 + b * 114) / 1000;
+        }
+
+        int Wp = W + 1;
+        long[] ii = new long[Wp * (H + 1)];
+        for (int y = 0; y < H; y++) {
+            long row = 0;
+            int srcBase = y * W;
+            int dstBase = (y + 1) * Wp;
+            int prevBase = y * Wp;
+            for (int x = 0; x < W; x++) {
+                row += gray[srcBase + x];
+                ii[dstBase + x + 1] = ii[prevBase + x + 1] + row;
             }
         }
-        if (bestSide < 64) return null;
-        return new Board(bestX, bestY, bestSide);
-    }
 
-    private static double periodicity(int[] sig, int start, int span) {
-        double sum = 0;
-        for (int k = 1; k < 8; k++) {
-            int p = start + (int) Math.round(span * k / 8.0);
-            int lo = Math.max(start, p - 4), hi = Math.min(start + span, p + 4);
-            int peak = 0;
-            for (int i = lo; i < hi && i < sig.length; i++) peak = Math.max(peak, sig[i]);
-            sum += peak;
-        }
-        return sum;
-    }
+        int minSide = Math.max(80, Math.min(W, H) / 3);
+        int maxSide = (int) (Math.min(W, H) * 0.98);
 
-    private static int[] projection(Bitmap bmp, boolean vertical) {
-        int W = bmp.getWidth(), H = bmp.getHeight();
-        int len = vertical ? W : H;
-        int[] sums = new int[len];
-        int step = 4;
-        for (int y = 0; y < H - step; y += step) {
-            for (int x = 0; x < W - step; x += step) {
-                int p0 = bmp.getPixel(x, y);
-                int p1 = vertical ? bmp.getPixel(x, y + step) : bmp.getPixel(x + step, y);
-                int diff = Math.abs(Color.red(p0)   - Color.red(p1))
-                         + Math.abs(Color.green(p0) - Color.green(p1))
-                         + Math.abs(Color.blue(p0)  - Color.blue(p1));
-                sums[vertical ? x : y] += diff;
+        Candidate best = null;
+
+        int sizeStep = Math.max(4, (maxSide - minSide) / 24);
+        for (int s = minSide; s <= maxSide; s += sizeStep) {
+            int cell = s / 8;
+            if (cell < 5) continue;
+            int corrected = cell * 8;
+            int posStep = Math.max(3, cell / 2);
+            for (int y = 0; y + corrected < H; y += posStep) {
+                for (int x = 0; x + corrected < W; x += posStep) {
+                    double score = checkerScore(ii, Wp, x, y, cell);
+                    if (best == null || score > best.score) {
+                        best = new Candidate(x, y, corrected, cell, score);
+                    }
+                }
             }
         }
-        return sums;
+
+        if (best == null) return null;
+
+        Candidate refined = refine(ii, Wp, W, H, best);
+
+        long elapsed = (System.nanoTime() - t0) / 1_000_000;
+        Log.d(TAG, "locate: " + W + "x" + H + " best=" + refined.score
+                + " bbox=(" + refined.x + "," + refined.y + ",s=" + refined.side + ")"
+                + " in " + elapsed + " ms");
+
+        if (refined.score < ACCEPT_THRESHOLD) return null;
+
+        int left = Math.round(refined.x / scale);
+        int top  = Math.round(refined.y / scale);
+        int side = Math.round(refined.side / scale);
+        return new Board(left, top, side, refined.score);
     }
 
-    private static int[] strongestRun(int[] sig, int approxLen) {
-        if (sig.length < approxLen) return null;
-        long best, window = 0;
-        int bestStart = 0;
-        for (int i = 0; i < approxLen; i++) window += sig[i];
-        best = window;
-        for (int i = approxLen; i < sig.length; i++) {
-            window += sig[i] - sig[i - approxLen];
-            if (window > best) { best = window; bestStart = i - approxLen + 1; }
+    private static Candidate refine(long[] ii, int Wp, int W, int H, Candidate c) {
+        Candidate best = c;
+        int cell = c.cell;
+        for (int dy = -cell; dy <= cell; dy += 2) {
+            for (int dx = -cell; dx <= cell; dx += 2) {
+                int x = c.x + dx, y = c.y + dy;
+                if (x < 0 || y < 0 || x + c.side >= W || y + c.side >= H) continue;
+                double sc = checkerScore(ii, Wp, x, y, cell);
+                if (sc > best.score) best = new Candidate(x, y, c.side, cell, sc);
+            }
         }
-        return new int[]{ bestStart, bestStart + approxLen };
+        for (int ds = -cell / 4; ds <= cell / 4; ds += 2) {
+            int newCell = cell + ds / 8;
+            if (newCell < 5) continue;
+            int newSide = newCell * 8;
+            int x = best.x, y = best.y;
+            if (x + newSide >= W || y + newSide >= H) continue;
+            double sc = checkerScore(ii, Wp, x, y, newCell);
+            if (sc > best.score) best = new Candidate(x, y, newSide, newCell, sc);
+        }
+        return best;
+    }
+
+    private static double checkerScore(long[] ii, int Wp, int x0, int y0, int cell) {
+        int samp = Math.max(2, cell / 5);
+        int inset = Math.max(2, cell / 6);
+
+        double[] light = new double[32];
+        double[] dark  = new double[32];
+        int li = 0, di = 0;
+
+        double[] corners = new double[4];
+
+        for (int r = 0; r < 8; r++) {
+            for (int f = 0; f < 8; f++) {
+                int cx = x0 + f * cell;
+                int cy = y0 + r * cell;
+
+                corners[0] = boxMean(ii, Wp, cx + inset,                cy + inset,                samp);
+                corners[1] = boxMean(ii, Wp, cx + cell - inset - samp,  cy + inset,                samp);
+                corners[2] = boxMean(ii, Wp, cx + inset,                cy + cell - inset - samp,  samp);
+                corners[3] = boxMean(ii, Wp, cx + cell - inset - samp,  cy + cell - inset - samp,  samp);
+
+                sort4(corners);
+                double median = (corners[1] + corners[2]) * 0.5;
+
+                if (((r + f) & 1) == 0) light[li++] = median;
+                else                    dark[di++]  = median;
+            }
+        }
+
+        double meanL = mean(light), meanD = mean(dark);
+        double sigmaL = std(light, meanL), sigmaD = std(dark, meanD);
+
+        double sep = Math.abs(meanL - meanD);
+        double noiseFloor = 4.0;
+        return sep * sep / (noiseFloor + sigmaL + sigmaD);
+    }
+
+    private static void sort4(double[] a) {
+        double t;
+        if (a[0] > a[1]) { t = a[0]; a[0] = a[1]; a[1] = t; }
+        if (a[2] > a[3]) { t = a[2]; a[2] = a[3]; a[3] = t; }
+        if (a[0] > a[2]) { t = a[0]; a[0] = a[2]; a[2] = t; }
+        if (a[1] > a[3]) { t = a[1]; a[1] = a[3]; a[3] = t; }
+        if (a[1] > a[2]) { t = a[1]; a[1] = a[2]; a[2] = t; }
+    }
+
+    private static double mean(double[] a) {
+        double s = 0; for (double v : a) s += v; return s / a.length;
+    }
+
+    private static double std(double[] a, double m) {
+        double s = 0;
+        for (double v : a) { double d = v - m; s += d * d; }
+        return Math.sqrt(s / a.length);
+    }
+
+    private static double boxMean(long[] ii, int Wp, int x, int y, int s) {
+        int x2 = x + s, y2 = y + s;
+        long sum = ii[y2 * Wp + x2] - ii[y * Wp + x2] - ii[y2 * Wp + x] + ii[y * Wp + x];
+        return (double) sum / (s * s);
+    }
+
+    private static final class Candidate {
+        final int x, y, side, cell;
+        final double score;
+        Candidate(int x, int y, int side, int cell, double score) {
+            this.x = x; this.y = y; this.side = side; this.cell = cell; this.score = score;
+        }
     }
 }
