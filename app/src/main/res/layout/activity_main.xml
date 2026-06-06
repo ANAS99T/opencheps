@@ -48,7 +48,52 @@
 
         <View
             android:layout_marginTop="20dp"
-            android:layout_marginBottom="20dp"
+            android:layout_marginBottom="16dp"
+            android:background="#3300C853"
+            android:layout_width="match_parent"
+            android:layout_height="1dp"/>
+
+        <TextView
+            android:text="Which colour are you?"
+            android:textColor="#FFFFFFFF"
+            android:textSize="14sp"
+            android:textStyle="bold"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"/>
+
+        <TextView
+            android:text="Arrows only appear on YOUR turn. The app decides whose turn it is by what you tell it here."
+            android:textColor="#FFB0BEC5"
+            android:textSize="11sp"
+            android:paddingTop="2dp"
+            android:paddingBottom="8dp"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"/>
+
+        <RadioGroup
+            android:id="@+id/sideGroup"
+            android:orientation="horizontal"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content">
+            <RadioButton
+                android:id="@+id/sideWhite"
+                android:text="White"
+                android:textColor="#FFFFFFFF"
+                android:checked="true"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"/>
+            <RadioButton
+                android:id="@+id/sideBlack"
+                android:text="Black"
+                android:textColor="#FFFFFFFF"
+                android:paddingStart="20dp"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"/>
+        </RadioGroup>
+
+        <View
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="16dp"
             android:background="#3300C853"
             android:layout_width="match_parent"
             android:layout_height="1dp"/>
@@ -98,10 +143,17 @@
 
         <TextView
             android:id="@+id/thinkLabel"
-            android:text="Think time: 700 ms"
+            android:text="Think time: 1500 ms — strong (≈3000 elo)"
             android:textColor="#FFFFFFFF"
             android:paddingTop="20dp"
             android:layout_width="wrap_content"
+            android:layout_height="wrap_content"/>
+
+        <TextView
+            android:text="Longer = stronger play but slower response. Stockfish 18 reaches ≈3300 elo at 2 s on 2 cores."
+            android:textColor="#FFB0BEC5"
+            android:textSize="11sp"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"/>
 
         <SeekBar
@@ -111,7 +163,7 @@
 
         <TextView
             android:id="@+id/multiPvLabel"
-            android:text="Candidate moves: 3"
+            android:text="Arrows to show: 3"
             android:textColor="#FFFFFFFF"
             android:paddingTop="12dp"
             android:layout_width="wrap_content"

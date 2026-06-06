@@ -9,6 +9,8 @@ import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.widget.Button;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
 import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -27,20 +29,25 @@ public class MainActivity extends AppCompatActivity {
     private Button btnOverlay, btnStart, btnStop;
     private TextView statusTv, thinkTv, multiPvTv;
     private SeekBar thinkBar, multiPvBar;
+    private RadioGroup sideGroup;
+    private RadioButton sideWhite, sideBlack;
     private MediaProjectionManager mpm;
 
     private final ActivityResultLauncher<Intent> projectionLauncher =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), r -> {
                 if (r.getResultCode() == Activity.RESULT_OK && r.getData() != null) {
+                    String side = sideBlack.isChecked() ? "b" : "w";
+                    Prefs.setUserSide(this, side);
                     Intent svc = new Intent(this, ScreenCaptureService.class);
                     svc.putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, r.getResultCode());
                     svc.putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, r.getData());
+                    svc.putExtra(ScreenCaptureService.EXTRA_USER_SIDE, side);
                     if (Build.VERSION.SDK_INT >= 26) startForegroundService(svc);
                     else startService(svc);
                     statusTv.setText(R.string.status_running);
                     btnStop.setEnabled(true);
                     btnStart.setEnabled(false);
-                    moveAppToBackground();
+                    moveTaskToBack(true);
                 } else {
                     toast("Screen capture not granted");
                 }
@@ -59,21 +66,27 @@ public class MainActivity extends AppCompatActivity {
         multiPvTv  = findViewById(R.id.multiPvLabel);
         thinkBar   = findViewById(R.id.thinkBar);
         multiPvBar = findViewById(R.id.multiPvBar);
+        sideGroup  = findViewById(R.id.sideGroup);
+        sideWhite  = findViewById(R.id.sideWhite);
+        sideBlack  = findViewById(R.id.sideBlack);
 
         SharedPreferences sp = Prefs.get(this);
-        int think = sp.getInt(Prefs.KEY_THINK_MS, 700);
+        int think = sp.getInt(Prefs.KEY_THINK_MS, 1500);
         int pv    = sp.getInt(Prefs.KEY_MULTIPV, 3);
-        thinkBar.setMax(2400);
+        String side = sp.getString(Prefs.KEY_USER_SIDE, "w");
+
+        thinkBar.setMax(3000);
         thinkBar.setProgress(think);
         multiPvBar.setMax(2);
         multiPvBar.setProgress(pv - 1);
-        thinkTv.setText("Think time: " + think + " ms");
-        multiPvTv.setText("Candidate moves: " + pv);
+        thinkTv.setText(thinkLabelText(think));
+        multiPvTv.setText("Arrows to show: " + pv);
+        if ("b".equals(side)) sideBlack.setChecked(true); else sideWhite.setChecked(true);
 
         thinkBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar b, int v, boolean u) {
-                int t = Math.max(200, v);
-                thinkTv.setText("Think time: " + t + " ms");
+                int t = Math.max(300, v);
+                thinkTv.setText(thinkLabelText(t));
                 sp.edit().putInt(Prefs.KEY_THINK_MS, t).apply();
             }
             @Override public void onStartTrackingTouch(SeekBar b) {}
@@ -82,11 +95,14 @@ public class MainActivity extends AppCompatActivity {
         multiPvBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar b, int v, boolean u) {
                 int n = v + 1;
-                multiPvTv.setText("Candidate moves: " + n);
+                multiPvTv.setText("Arrows to show: " + n);
                 sp.edit().putInt(Prefs.KEY_MULTIPV, n).apply();
             }
             @Override public void onStartTrackingTouch(SeekBar b) {}
             @Override public void onStopTrackingTouch(SeekBar b) {}
+        });
+        sideGroup.setOnCheckedChangeListener((g, id) -> {
+            Prefs.setUserSide(this, id == R.id.sideBlack ? "b" : "w");
         });
 
         btnOverlay.setOnClickListener(v -> requestOverlay());
@@ -107,6 +123,15 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    private String thinkLabelText(int ms) {
+        String strength;
+        if (ms < 500)       strength = "fast (≈2200 elo)";
+        else if (ms < 1000) strength = "balanced (≈2700 elo)";
+        else if (ms < 2000) strength = "strong (≈3000 elo)";
+        else                strength = "max (≈3300+ elo)";
+        return "Think time: " + ms + " ms — " + strength;
+    }
+
     @Override protected void onResume() {
         super.onResume();
         boolean overlay = Settings.canDrawOverlays(this);
@@ -115,10 +140,6 @@ public class MainActivity extends AppCompatActivity {
                 ? getString(R.string.overlay_granted)
                 : getString(R.string.grant_overlay));
         btnStart.setEnabled(overlay);
-    }
-
-    private void moveAppToBackground() {
-        moveTaskToBack(true);
     }
 
     private void requestOverlay() {

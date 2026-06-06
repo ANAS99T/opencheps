@@ -24,6 +24,8 @@ public class PieceClassifier {
     private char[] labels;
     private float[] emptyLightRGB, emptyDarkRGB;
     private float emptyColorTolerance;
+    private float whitePieceLumAvg;
+    private float blackPieceLumAvg;
     private boolean trained;
     private Side bootstrapSide;
 
@@ -98,8 +100,24 @@ public class PieceClassifier {
         emptyDarkRGB  = darkRGB;
         emptyColorTolerance = tolerance;
         bootstrapSide = side;
+
+        float whiteSum = 0; int whiteN = 0;
+        float blackSum = 0; int blackN = 0;
+        for (int i = 0; i < 64; i++) {
+            char c = labels[i];
+            if (c == '.') continue;
+            float pieceLum = pieceLuminanceDelta(samples[i], i);
+            if (Character.isUpperCase(c)) { whiteSum += pieceLum; whiteN++; }
+            else                          { blackSum += pieceLum; blackN++; }
+        }
+        whitePieceLumAvg = whiteN > 0 ? whiteSum / whiteN : 0.3f;
+        blackPieceLumAvg = blackN > 0 ? blackSum / blackN : -0.3f;
+
         trained = true;
-        Log.i(TAG, "BOOTSTRAPPED side=" + side + " tolerance=" + tolerance);
+        Log.i(TAG, "BOOTSTRAPPED side=" + side
+                + " whiteDelta=" + whitePieceLumAvg
+                + " blackDelta=" + blackPieceLumAvg
+                + " tol=" + tolerance);
         return true;
     }
 
@@ -146,19 +164,34 @@ public class PieceClassifier {
         return dr * dr + dg * dg + db * db;
     }
 
+    private float pieceLuminanceDelta(SquareSampler.Sample s, int squareIdx) {
+        boolean light = (((squareIdx / 8) + (squareIdx % 8)) & 1) == 0;
+        float bgLum = light
+                ? 0.299f * emptyLightRGB[0] + 0.587f * emptyLightRGB[1] + 0.114f * emptyLightRGB[2]
+                : 0.299f * emptyDarkRGB[0]  + 0.587f * emptyDarkRGB[1]  + 0.114f * emptyDarkRGB[2];
+        return s.meanLum - bgLum;
+    }
+
     private char nearest(SquareSampler.Sample s, int r, int f) {
         boolean light = ((r + f) & 1) == 0;
         float[] ref = light ? emptyLightRGB : emptyDarkRGB;
         if (sqDist(s, ref) <= emptyColorTolerance) return '.';
 
+        float delta = pieceLuminanceDelta(s, r * 8 + f);
+        float distToWhite = Math.abs(delta - whitePieceLumAvg);
+        float distToBlack = Math.abs(delta - blackPieceLumAvg);
+        boolean isWhitePiece = distToWhite < distToBlack;
+
         float best = Float.MAX_VALUE;
-        char bestC = '.';
+        char bestC = isWhitePiece ? 'P' : 'p';
         for (int i = 0; i < templates.length; i++) {
-            if (labels[i] == '.') continue;
+            char tc = labels[i];
+            if (tc == '.') continue;
+            if (Character.isUpperCase(tc) != isWhitePiece) continue;
             boolean tplLight = (((i / 8) + (i % 8)) & 1) == 0;
             if (tplLight != light) continue;
             float d = SquareSampler.distance(s.feature, templates[i].feature);
-            if (d < best) { best = d; bestC = labels[i]; }
+            if (d < best) { best = d; bestC = tc; }
         }
         return bestC;
     }

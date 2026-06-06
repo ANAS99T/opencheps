@@ -49,6 +49,7 @@ public class ScreenCaptureService extends Service {
 
     public static final String EXTRA_RESULT_CODE = "result_code";
     public static final String EXTRA_RESULT_DATA = "result_data";
+    public static final String EXTRA_USER_SIDE   = "user_side";
     public static final String ACTION_STOP       = "com.opencheps.STOP";
 
     private static final int[]   ARROW_COLORS = { 0xFF00C853, 0xFFFFB300, 0xFF29B6F6 };
@@ -71,10 +72,12 @@ public class ScreenCaptureService extends Service {
     private volatile boolean busy = false;
     private volatile boolean paused = false;
 
-    private String lastFen = "";
-    private Side  lastDetectedStm = null;
-    private int   lastMaterial = Integer.MIN_VALUE;
-    private int   noBoardCount = 0;
+    private Side userSide = Side.WHITE;
+    private String lastClassifiedFen = "";
+    private int lastMaterial = Integer.MIN_VALUE;
+    private Side lastInferredStm = null;
+    private int noBoardCount = 0;
+    private int sameFenCount = 0;
 
     @Nullable @Override public IBinder onBind(Intent i) { return null; }
 
@@ -88,6 +91,9 @@ public class ScreenCaptureService extends Service {
 
         int resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0);
         Intent data = intent.getParcelableExtra(EXTRA_RESULT_DATA);
+        String sideStr = intent.getStringExtra(EXTRA_USER_SIDE);
+        if (sideStr == null) sideStr = Prefs.userSide(this);
+        userSide = "b".equals(sideStr) ? Side.BLACK : Side.WHITE;
 
         MediaProjectionManager mpm =
                 (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
@@ -112,7 +118,7 @@ public class ScreenCaptureService extends Service {
             try {
                 engine.start(getApplicationContext());
                 engineReady = true;
-                panelStatus("Engine ready • searching for board");
+                panelStatus("Engine ready • playing as " + userSide);
             } catch (Exception e) {
                 Log.e(TAG, "engine start failed", e);
                 panelStatus("Engine error: " + e.getMessage());
@@ -122,7 +128,7 @@ public class ScreenCaptureService extends Service {
         setupVirtualDisplay();
         wirePanel();
         worker.postDelayed(sampleLoop, 1200);
-        panelStatus("Starting…");
+        panelStatus("Starting as " + userSide + "…");
         return START_STICKY;
     }
 
@@ -131,6 +137,7 @@ public class ScreenCaptureService extends Service {
             FloatingPanel p = OverlayService.panel();
             if (p != null) {
                 p.placeBottomLeft(screenW, screenH);
+                p.setUserSide(userSide);
                 p.setListener(new FloatingPanel.Listener() {
                     @Override public void onPauseToggle(boolean isPaused) {
                         paused = isPaused;
@@ -138,17 +145,28 @@ public class ScreenCaptureService extends Service {
                             OverlayService.clearOverlays();
                             panelStatus("Paused");
                         } else {
-                            lastFen = "";
+                            lastClassifiedFen = "";
                             panelStatus("Resumed");
                         }
                     }
                     @Override public void onStop() { stopSelf(); }
                     @Override public void onRecalibrate() {
                         classifier.reset();
-                        lastFen = "";
+                        lastClassifiedFen = "";
                         lastMaterial = Integer.MIN_VALUE;
-                        lastDetectedStm = null;
+                        lastInferredStm = null;
                         panelStatus("Re-calibrating — show starting position");
+                    }
+                    @Override public void onSideChange(Side newSide) {
+                        userSide = newSide;
+                        Prefs.setUserSide(getApplicationContext(),
+                                newSide == Side.BLACK ? "b" : "w");
+                        classifier.reset();
+                        lastClassifiedFen = "";
+                        lastMaterial = Integer.MIN_VALUE;
+                        lastInferredStm = null;
+                        OverlayService.clearOverlays();
+                        panelStatus("Switched to " + newSide + " — recalibrating");
                     }
                 });
             }
@@ -183,7 +201,7 @@ public class ScreenCaptureService extends Service {
             if (board == null) {
                 noBoardCount++;
                 if (noBoardCount == 1 || noBoardCount % 5 == 0) {
-                    panelStatus("Looking for board… (" + noBoardCount + ")");
+                    panelStatus("Looking for board…");
                 }
                 OverlayService.clearOverlays();
                 return;
@@ -204,30 +222,53 @@ public class ScreenCaptureService extends Service {
                     panelStatus("Board found — show STARTING position to calibrate");
                     return;
                 }
-                panelStatus("Calibrated as " + classifier.bootstrapSide() + " POV");
+                Side detectedPov = classifier.bootstrapSide();
+                if (detectedPov != userSide) {
+                    classifier.reset();
+                    panelStatus("Detected " + detectedPov + " POV but you set "
+                            + userSide + " — tap recalibrate after fixing");
+                    return;
+                }
+                panelStatus("Calibrated • you play " + userSide);
             }
 
             char[][] grid = classifier.classifyBoard(bmp, board);
             if (grid == null) return;
 
             int material = FenBuilder.materialDiff(grid);
-            Side stm = inferStm(material);
+            Side inferredStm = inferStm(material);
 
-            String fen = FenBuilder.build(grid, classifier.bootstrapSide(), stm);
-            if (fen == null) {
+            boolean userTurn = inferredStm == userSide;
+
+            String fenForUser = FenBuilder.build(grid, classifier.bootstrapSide(), userSide);
+            if (fenForUser == null) {
                 panelStatus("Position invalid — waiting for clean frame");
                 return;
             }
-            if (fen.equals(lastFen)) return;
-            lastFen = fen;
-            lastDetectedStm = stm;
+            if (fenForUser.equals(lastClassifiedFen)) {
+                sameFenCount++;
+                return;
+            }
+            sameFenCount = 0;
+            lastClassifiedFen = fenForUser;
             lastMaterial = material;
+            lastInferredStm = inferredStm;
+
+            if (!userTurn) {
+                OverlayService.clearOverlays();
+                OverlayService.setBoardBounds(screenBoardBounds);
+                panelStatus(opponentName() + "'s turn — waiting");
+                panelEval("");
+                return;
+            }
 
             int think    = Prefs.thinkMs(getApplicationContext());
             int multiPv  = Math.max(1, Math.min(3, Prefs.multiPv(getApplicationContext())));
 
-            panelStatus("Thinking " + think + "ms (" + stm + " to move)");
-            List<StockfishEngine.Pv> pvs = engine.topMoves(fen, think, multiPv);
+            panelStatus("Thinking " + think + " ms…");
+            long t0 = System.currentTimeMillis();
+            List<StockfishEngine.Pv> pvs = engine.topMoves(fenForUser, think, multiPv);
+            long dt = System.currentTimeMillis() - t0;
             if (pvs.isEmpty()) {
                 panelStatus("Engine: no legal move");
                 return;
@@ -238,8 +279,8 @@ public class ScreenCaptureService extends Service {
             String evalStr = best.mate
                     ? "M" + Math.abs(plyToMate(best.cp))
                     : String.format("%+.2f", best.cp / 100.0);
-            panelEval(stm + " • " + formatUci(best.uci) + " (" + evalStr + ")");
-            panelStatus("Engine ready");
+            panelEval("YOU (" + userSide + ") play " + formatUci(best.uci) + "  " + evalStr);
+            panelStatus("Your move • depth ~" + dt + "ms");
         } catch (Exception e) {
             Log.w(TAG, "loop iter failed: " + e.getMessage(), e);
         } finally {
@@ -247,6 +288,10 @@ public class ScreenCaptureService extends Service {
             if (img != null) try { img.close(); } catch (Exception ignored) {}
             busy = false;
         }
+    }
+
+    private String opponentName() {
+        return userSide == Side.WHITE ? "Black" : "White";
     }
 
     private int plyToMate(int cp) {
@@ -261,10 +306,9 @@ public class ScreenCaptureService extends Service {
 
     private Side inferStm(int material) {
         if (lastMaterial == Integer.MIN_VALUE) return Side.WHITE;
-        if (material == lastMaterial) {
-            return lastDetectedStm == Side.WHITE ? Side.BLACK : Side.WHITE;
-        }
-        return material < lastMaterial ? Side.WHITE : Side.BLACK;
+        if (material < lastMaterial) return Side.WHITE;
+        if (material > lastMaterial) return Side.BLACK;
+        return lastInferredStm == Side.WHITE ? Side.BLACK : Side.WHITE;
     }
 
     private Rect boardBoundsOnScreen(BoardDetector.Board board) {
@@ -278,11 +322,11 @@ public class ScreenCaptureService extends Service {
     private void renderArrows(List<StockfishEngine.Pv> pvs, BoardDetector.Board board) {
         List<ArrowOverlayView.Arrow> out = new ArrayList<>();
         Side persp = classifier.bootstrapSide();
-        float cellScreen = board.square * ((capToScreenX + capToScreenY) * 0.5f);
+        float cellX = board.square * capToScreenX;
+        float cellY = board.square * capToScreenY;
+        float cellAvg = (cellX + cellY) * 0.5f;
         float ox = board.left * capToScreenX;
         float oy = board.top  * capToScreenY;
-        float cellX = (board.square * capToScreenX);
-        float cellY = (board.square * capToScreenY);
 
         for (int i = 0; i < pvs.size(); i++) {
             String uci = pvs.get(i).uci;
@@ -295,7 +339,7 @@ public class ScreenCaptureService extends Service {
             float sx = ox + (fx + 0.5f) * cellX, sy = oy + (fy + 0.5f) * cellY;
             float ex = ox + (tx + 0.5f) * cellX, ey = oy + (ty + 0.5f) * cellY;
             String lbl = (i == 0 ? "★ " : "") + uci;
-            float width = Math.max(8f, ARROW_WIDTHS[i] * Math.min(1.5f, cellScreen / 60f));
+            float width = Math.max(8f, ARROW_WIDTHS[i] * Math.min(1.5f, cellAvg / 60f));
             out.add(new ArrowOverlayView.Arrow(
                     sx, sy, ex, ey, ARROW_COLORS[i], width, lbl));
         }

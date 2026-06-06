@@ -11,5 +11,5 @@
     <string name="notif_title">OpenCheps is watching</string>
     <string name="notif_text">Tap Stop on the floating panel to end the session</string>
     <string name="how_it_works">How auto-detection works</string>
-    <string name="how_it_works_body">1. Open a chess app showing the starting position.\n2. Tap Start Watching, accept both system prompts.\n3. OpenCheps locates the board, captures piece templates, auto-detects which side you play, then watches every move.\n4. Floating panel shows live engine eval; arrows on screen show top moves.</string>
+    <string name="how_it_works_body">1. Pick your colour above.\n2. Open chess app on STARTING position.\n3. Tap Start Watching, accept both prompts.\n4. App locates the board and learns piece templates.\n5. Arrows appear only on YOUR turn.\n6. If position glitches: tap recalibrate on the floating panel.</string>
 </resources>

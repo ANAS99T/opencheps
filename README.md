@@ -10,13 +10,15 @@ It's a personal project, not a polished commercial product. It works, it has rou
 
 ## What it actually does, end to end
 
-1. You open OpenCheps, grant **Display over other apps** and **Screen capture** permissions, hit Start. The activity sends itself to the background.
+1. You open OpenCheps, pick **White** or **Black** (the colour you're playing), grant **Display over other apps** and **Screen capture** permissions, hit Start. The activity sends itself to the background.
 2. A foreground service grabs frames from a `VirtualDisplay` at about 1.4 fps. Each frame is downscaled to a 720-pixel longest edge before processing — that's the single biggest performance trick. On a 1080×2340 P30 Lite screen this means we work on ~330×720 instead of the full panel.
-3. A board detector scans that downscaled image for the strongest 8×8 checker pattern and returns its bounding box. This is the only really hard part of the app, and the algorithm is described below.
-4. The first time it finds a board, it waits for you to show it the **starting position** (any board theme works). When it sees one, it snapshots all 32 piece-square crops as labeled templates from your own theme, learns the average color of each empty light/dark square, and figures out from king/queen luminance which side you're playing from. That's the "calibration" step. It runs once per session.
-5. From then on, every frame: locate board → sample each of the 64 squares at its center → either match it to the closest template of the same square-color, or call it empty if the color is within tolerance of the calibrated empty color. Build a FEN. If the FEN changed, send it to Stockfish.
-6. Stockfish 18 runs as a child process of the app. I ask for the top 3 candidate moves with a configurable think time (default 700 ms). When it answers, I un-flip the coordinates (if you're playing Black) and draw three colored arrows: green for the best move, amber for #2, blue for #3, with the move in algebraic notation labeled at the midpoint. The eval (centipawn or mate-in-N) goes on the floating panel.
-7. There's a small draggable panel anchored to the bottom-left by default with status text, the live engine eval, and three buttons: pause, recalibrate (use this if you flip the board or start a new game), stop.
+3. A board detector scans that downscaled image for the strongest 8×8 checker pattern and returns its bounding box.
+4. The first time it finds a board, it waits for you to show it the **starting position** (any board theme works). When it sees one, it snapshots all 32 piece-square crops as labeled templates from your own theme, learns the average color of each empty light/dark square, and computes the average luminance delta of white pieces vs black pieces. That's the "calibration" step. It runs once per session.
+5. If the detected board orientation doesn't match the colour you picked, calibration is rejected and the panel says so — you flip the board (or fix the picker) and tap recalibrate.
+6. Every frame after that: locate board → sample each of the 64 squares at its center → if it's within tolerance of empty: empty. Otherwise: figure out the piece's color from luminance delta, then nearest-template within that color group of the same square parity. Build a FEN with **you to move** (your colour). If the FEN changed, send it to Stockfish.
+7. **Whose turn is it?** I use a material-delta heuristic between consecutive distinct frames: material drop → that side just got captured → it's now that side's move. **Arrows only render when it's your turn.** When it's the opponent's turn, the panel says "Black's turn — waiting" (or White's) and shows no arrows. This is the fix for the "showing arrows for my opponent" bug.
+8. Stockfish 18 runs as a child process of the app. I ask for the top 3 candidate moves with a configurable think time (default 1500 ms — strong play, ≈3000 elo). When it answers, I un-flip the coordinates (if you're playing Black) and draw three colored arrows: green for the best move, amber for #2, blue for #3, with the move in algebraic notation labeled at the midpoint. The eval (centipawn or mate-in-N) goes on the floating panel.
+9. The floating panel has its own White/Black pill toggle, so you can fix your colour without going back to the main activity. Changing it triggers recalibration automatically.
 
 ---
 
@@ -57,10 +59,10 @@ There are no Sobel filters, no Hough lines, no OpenCV dependency. The whole thin
 
 There's no machine-learning model file shipped with the app. Instead:
 
-- **Bootstrap.** The first frame that contains a starting position calibrates everything. I sample the center 56% of each square (radius = 0.28 × cell — kept tight to avoid leaking into neighbor squares when the detector's offset is slightly off). For empty middle squares I average the RGB to get a reference "empty light" and "empty dark" color. The maximum RGB distance of an actual empty square from its reference defines the tolerance — anything within 3.5× that distance is considered empty. The 32 occupied squares become labeled piece templates.
-- **Classification each frame.** For each of the 64 squares: if its mean RGB is within tolerance of the reference empty color for that parity, it's empty. Otherwise, compute squared pixel distance against every template of the same color parity, and take the nearest label. The same-parity constraint avoids matching a black piece on a dark square against a black piece on a light square, which would dominate due to the background color difference.
-- **Side detection.** During bootstrap, average the luminance of every filled top-rank square vs every filled bottom-rank square. Brighter on the bottom → user plays White. Darker on the bottom → user plays Black. The board is un-flipped accordingly when building the FEN and when mapping move coordinates back to screen pixels.
-- **Side-to-move tracking.** I use the material delta between consecutive non-identical frames. If white material went down, that capture was a White piece being taken, meaning it's now White's move. Falls back to simple alternation when material is unchanged. Not perfect but covers most real games.
+- **Bootstrap.** The first frame that contains a starting position calibrates everything. I sample the center 56% of each square (radius = 0.28 × cell — kept tight to avoid leaking into neighbor squares when the detector's offset is slightly off). For empty middle squares I average the RGB to get a reference "empty light" and "empty dark" color. The maximum RGB distance of an actual empty square from its reference defines the tolerance — anything within 3.5× that distance is considered empty. The 32 occupied squares become labeled piece templates. I also compute the average luminance delta (square mean luminance − empty-square reference luminance) separately for white pieces and black pieces — this becomes the color prior.
+- **Classification each frame.** For each of the 64 squares: if its mean RGB is within tolerance of the reference empty color for that parity, it's empty. Otherwise: compute its luminance delta from the empty reference, decide white piece vs black piece based on which average it's closer to, then take the nearest pixel-distance template **within that piece-color group and matching square parity**. The two-stage gate (color first, type second) cuts the classification error roughly in half on positions where white and black pieces sit on the same square parity — before, a black knight on a dark square might end up matched against a white piece template whose silhouette happened to be similar; now it can only be matched against the 16 black-piece templates.
+- **Side detection at bootstrap.** Average the luminance of every filled top-rank square vs every filled bottom-rank square. Brighter on the bottom → board shows White at bottom. If this disagrees with the colour you picked in the UI, bootstrap is rejected and you're told.
+- **Side-to-move tracking.** Material delta between consecutive distinct frames. Material went down → that side just got captured → it's that side's move now. Fallback for non-capture moves: simple alternation. **Arrows are only drawn when the inferred side-to-move equals the colour you picked.** When it's not your turn, the overlay clears and the panel shows whose turn it thinks it is.
 
 ---
 
@@ -68,8 +70,9 @@ There's no machine-learning model file shipped with the app. Instead:
 
 I'm being upfront here:
 
-- **Same-color piece confusion.** The classifier matches by raw pixel distance. Two pieces of the same color on squares of the same parity look very similar — a knight and a pawn at low resolution especially. Expect 4–6 wrong squares per mid-game position. This usually still produces a *legal* FEN, and Stockfish will give a sensible move for that position; visually the move usually looks plausible too. To go meaningfully higher you'd need a CNN classifier (32×32×3 → 13-way softmax), trained on screenshots from common chess apps. I left a clean place to plug that in (`PieceClassifier.classifyBoard`) if anyone wants to PR one.
-- **Animations.** During chess.com's slide animation, the captured frame is mid-motion and the FEN parses as something nonsense. The duplicate-FEN-skip means the bad frame doesn't usually trigger an engine call, but you'll see ~1 second of stale arrows.
+- **Same-color piece confusion.** The classifier matches by raw pixel distance within a color group. Two pieces of the same color on squares of the same parity look very similar at our 16×16 sampled feature size — a knight and a pawn especially. Expect 1–4 wrong squares per mid-game position depending on theme. This usually still produces a *legal* FEN, and Stockfish gives a sensible move for that position; visually the move usually looks plausible too. To go meaningfully higher you'd need a CNN classifier (32×32×3 → 13-way softmax), trained on screenshots from common chess apps. I left a clean place to plug that in (`PieceClassifier.classifyBoard`).
+- **"It suggested a wrong move."** Stockfish 18 is rated ~3645 Elo — it does not suggest wrong moves. When it looks wrong, the cause is almost always one of: (a) wrong colour selected — arrows are for your *opponent's* best move because the engine thinks it's their turn; (b) a piece was misclassified so the position Stockfish analyzed isn't the position on your screen; (c) the FEN side-to-move was wrong due to material-tracking confusion (typically after a complicated sequence). Hit **Recalibrate** on the floating panel, double-check the white/black pill, and the next frame should be correct.
+- **Animations.** During chess.com's slide animation, the captured frame is mid-motion and the FEN can parse as something nonsense. The duplicate-FEN-skip means the bad frame doesn't usually trigger an engine call, but you'll see ~1 second of stale arrows.
 - **Theme changes mid-session.** If you swap board theme without recalibrating, every square will read as "occupied" because the empty colors no longer match. The fix is the **Recalibrate** button on the floating panel — tap it and show the starting position again.
 - **Castling, en passant, draw claims.** The FEN I build always has castling rights `-` and ep-square `-`. Stockfish will still play legal moves, but it won't suggest castling. Adding real castling rights tracking requires move-history reconstruction, which I haven't done.
 - **EMUI battery killer.** Huawei's EMUI is aggressive about killing background services. Go to *Settings → Apps → OpenCheps → Battery → App launch* and switch it to "Manage manually" with Auto-launch, Run in background, and Secondary launch all on. Without this, the service is killed within a minute of you switching away from the OpenCheps activity.
@@ -95,7 +98,7 @@ setoption name MultiPV value 3
 setoption name Move Overhead value 100
 ```
 
-2 threads because the P30 Lite's Kirin 710 has a 4+4 big.LITTLE config and we don't want to choke the UI thread that's already doing image processing. 48 MB hash is a reasonable middle ground.
+2 threads because the P30 Lite's Kirin 710 has a 4+4 big.LITTLE config and we don't want to choke the UI thread that's already doing image processing. 48 MB hash is a reasonable middle ground. Default think time is 1500 ms per move — this gives Stockfish 18 roughly its full strength on mobile (~3000+ Elo); you can slide it down to 300 ms for snappier response or up to 3000 ms for absolute maximum play.
 
 ---
 
@@ -112,11 +115,13 @@ The Stockfish download is cached between CI runs, so subsequent builds skip the 
 
 ## Permission flow on first launch
 
-1. Tap **Grant Overlay Permission** → system Settings → enable for OpenCheps → back to app.
-2. Tap **Start Watching** → the system shows the standard *"OpenCheps will start capturing everything that's displayed on your screen"* dialog → tap Start now.
-3. The activity sends itself to the background (`moveTaskToBack`), the floating panel appears, and the notification shows.
-4. Open your chess app at the starting position. Within one or two sample cycles the panel should say "Calibrated as WHITE POV" or BLACK POV.
-5. Play normally. Arrows appear over the board on every position change.
+1. Open OpenCheps. **Pick your colour** (White or Black) — this is the most important setting in the app. Get it wrong and the arrows will be for your opponent.
+2. Tap **Grant Overlay Permission** → system Settings → enable for OpenCheps → back to app.
+3. Tap **Start Watching** → the system shows the standard *"OpenCheps will start capturing everything that's displayed on your screen"* dialog → tap Start now.
+4. The activity sends itself to the background (`moveTaskToBack`), the floating panel appears, and the notification shows.
+5. Open your chess app at the starting position. Within one or two sample cycles the panel should say "Calibrated • you play WHITE" (or BLACK).
+6. Play normally. Arrows appear only on your turn.
+7. If you ever flip the board, change colour, change theme, or just see the wrong-looking arrows: tap the **white/black pill** on the floating panel (auto-recalibrates) or the **blue circular arrow** button (manual recalibrate).
 
 ---
 
