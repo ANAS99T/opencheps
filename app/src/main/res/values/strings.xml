@@ -1,0 +1,15 @@
+<resources>
+    <string name="app_name">OpenCheps</string>
+    <string name="start">Start Watching</string>
+    <string name="stop">Stop</string>
+    <string name="grant_overlay">Grant Overlay Permission</string>
+    <string name="grant_capture">Grant Screen Capture</string>
+    <string name="playing_as">I am playing as</string>
+    <string name="white">White</string>
+    <string name="black">Black</string>
+    <string name="status_idle">Idle</string>
+    <string name="status_running">Running — engine thinking…</string>
+    <string name="notif_channel">OpenCheps Service</string>
+    <string name="notif_title">OpenCheps is watching</string>
+    <string name="notif_text">Tap Stop in the app to end the session.</string>
+</resources>

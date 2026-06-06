@@ -1,0 +1,5 @@
+<resources>
+    <color name="arrow_best">#FF00C853</color>
+    <color name="arrow_alt">#FFFFA000</color>
+    <color name="arrow_shadow">#80000000</color>
+</resources>
