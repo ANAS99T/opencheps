@@ -7,5 +7,5 @@ build/
 captures/
 .externalNativeBuild/
 .cxx/
-app/src/main/assets/stockfish
-app/src/main/assets/piece_classifier.tflite
+app/src/main/jniLibs/*/libstockfish.so
+sf-cache/

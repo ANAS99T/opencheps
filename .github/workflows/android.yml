@@ -9,6 +9,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    env:
+      SF18_TAG: sf_18
+      SF18_ARM64_SHA: cc3b3b74466b6d85cdc0f8cfdad4111c6a44bd0698f4eab96fea7b359a54d3d4
+      SF18_ARMV7_SHA: 672fbd7533d15fc70dae82df52c1185236975d059a585aa65eda960f1a3266ea
+
     steps:
       - uses: actions/checkout@v4
 
@@ -29,19 +34,58 @@ jobs:
           gradle wrapper --gradle-version 8.7 --distribution-type bin
           chmod +x gradlew
 
-      - name: Create placeholder stockfish asset
-        run: |
-          mkdir -p app/src/main/assets
-          if [ ! -f app/src/main/assets/stockfish ]; then
-            printf '#!/system/bin/sh\necho "placeholder - replace with real stockfish arm64 binary"\n' > app/src/main/assets/stockfish
-          fi
+      - name: Cache Stockfish 18 binaries
+        id: sfcache
+        uses: actions/cache@v4
+        with:
+          path: sf-cache
+          key: stockfish-${{ env.SF18_TAG }}-v3
 
-      - name: Build debug APK
+      - name: Download Stockfish 18 (arm64-v8a + armv7-neon)
+        if: steps.sfcache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p sf-cache
+          curl -fL -o sf-cache/arm64.tar  https://github.com/official-stockfish/Stockfish/releases/download/${{ env.SF18_TAG }}/stockfish-android-armv8.tar
+          curl -fL -o sf-cache/armv7.tar  https://github.com/official-stockfish/Stockfish/releases/download/${{ env.SF18_TAG }}/stockfish-android-armv7-neon.tar
+          cd sf-cache
+          tar xf arm64.tar
+          tar xf armv7.tar
+          mv stockfish/stockfish-android-armv8       libstockfish-arm64.so
+          mv stockfish/stockfish-android-armv7-neon  libstockfish-armv7.so
+          rm -rf stockfish arm64.tar armv7.tar
+          ls -la
+
+      - name: Verify SHA256
+        run: |
+          set -euo pipefail
+          cd sf-cache
+          echo "${SF18_ARM64_SHA}  libstockfish-arm64.so" | sha256sum -c -
+          echo "${SF18_ARMV7_SHA}  libstockfish-armv7.so" | sha256sum -c -
+
+      - name: Install Stockfish 18 into jniLibs
+        run: |
+          mkdir -p app/src/main/jniLibs/arm64-v8a app/src/main/jniLibs/armeabi-v7a
+          cp sf-cache/libstockfish-arm64.so  app/src/main/jniLibs/arm64-v8a/libstockfish.so
+          cp sf-cache/libstockfish-armv7.so  app/src/main/jniLibs/armeabi-v7a/libstockfish.so
+          ls -la app/src/main/jniLibs/*/
+
+      - name: Build debug APK splits
         run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
 
-      - name: Upload APK
+      - name: List APKs
+        run: find app/build/outputs/apk -name '*.apk' -exec ls -lh {} \;
+
+      - name: Upload arm64 APK
         uses: actions/upload-artifact@v4
         with:
-          name: opencheps-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          name: opencheps-arm64-v8a-debug
+          path: app/build/outputs/apk/debug/*arm64-v8a*.apk
+          if-no-files-found: error
+
+      - name: Upload armv7 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencheps-armeabi-v7a-debug
+          path: app/build/outputs/apk/debug/*armeabi-v7a*.apk
           if-no-files-found: error

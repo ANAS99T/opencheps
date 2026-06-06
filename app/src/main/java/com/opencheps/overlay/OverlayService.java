@@ -4,6 +4,7 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.PixelFormat;
+import android.graphics.Rect;
 import android.os.Build;
 import android.os.IBinder;
 import android.util.Log;
@@ -20,7 +21,8 @@ public class OverlayService extends Service {
     private static OverlayService instance;
 
     private WindowManager wm;
-    private ArrowOverlayView view;
+    private ArrowOverlayView arrows;
+    private FloatingPanel panel;
 
     @Nullable @Override public IBinder onBind(Intent i) { return null; }
 
@@ -28,7 +30,7 @@ public class OverlayService extends Service {
         super.onCreate();
         instance = this;
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
-        view = new ArrowOverlayView(this);
+        arrows = new ArrowOverlayView(this);
 
         int type = Build.VERSION.SDK_INT >= 26
                 ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -45,17 +47,31 @@ public class OverlayService extends Service {
                 PixelFormat.TRANSLUCENT);
         lp.gravity = Gravity.TOP | Gravity.START;
 
-        try { wm.addView(view, lp); }
-        catch (Exception e) { Log.e(TAG, "addView failed", e); }
+        try { wm.addView(arrows, lp); }
+        catch (Exception e) { Log.e(TAG, "addView arrows failed", e); }
+
+        panel = new FloatingPanel(this);
+        panel.attach();
     }
 
     @Override public void onDestroy() {
-        try { if (view != null) wm.removeView(view); } catch (Exception ignored) {}
+        try { if (arrows != null) wm.removeView(arrows); } catch (Exception ignored) {}
+        if (panel != null) panel.detach();
         instance = null;
         super.onDestroy();
     }
 
-    public static void pushArrows(Context ctx, List<ArrowOverlayView.Arrow> arrows) {
-        if (instance != null && instance.view != null) instance.view.setArrows(arrows);
+    public static FloatingPanel panel() {
+        return instance == null ? null : instance.panel;
+    }
+
+    public static void pushArrows(List<ArrowOverlayView.Arrow> a, Rect bounds) {
+        if (instance == null) return;
+        instance.arrows.setBoardBounds(bounds);
+        instance.arrows.setArrows(a);
+    }
+
+    public static void clearOverlays() {
+        if (instance != null) instance.arrows.clearAll();
     }
 }

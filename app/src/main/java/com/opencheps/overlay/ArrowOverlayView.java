@@ -5,6 +5,7 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.Rect;
 import android.view.View;
 
 import java.util.ArrayList;
@@ -17,16 +18,22 @@ public class ArrowOverlayView extends View {
         public final float sx, sy, ex, ey;
         public final int color;
         public final float widthPx;
-        public Arrow(float sx, float sy, float ex, float ey, int color, float widthPx) {
+        public final String label;
+        public Arrow(float sx, float sy, float ex, float ey,
+                     int color, float widthPx, String label) {
             this.sx = sx; this.sy = sy; this.ex = ex; this.ey = ey;
-            this.color = color; this.widthPx = widthPx;
+            this.color = color; this.widthPx = widthPx; this.label = label;
         }
     }
 
     private final List<Arrow> arrows = new ArrayList<>();
+    private Rect boardBounds;
     private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint shadow = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint head   = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint frame  = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint label  = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint labelBg= new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path  headPath = new Path();
 
     public ArrowOverlayView(Context ctx) {
@@ -35,8 +42,16 @@ public class ArrowOverlayView extends View {
         stroke.setStrokeCap(Paint.Cap.ROUND);
         shadow.setStyle(Paint.Style.STROKE);
         shadow.setStrokeCap(Paint.Cap.ROUND);
-        shadow.setColor(0x80000000);
+        shadow.setColor(0x99000000);
         head.setStyle(Paint.Style.FILL);
+        frame.setStyle(Paint.Style.STROKE);
+        frame.setStrokeWidth(4f);
+        frame.setColor(0x6600C853);
+        label.setColor(0xFFFFFFFF);
+        label.setTextSize(28f);
+        label.setFakeBoldText(true);
+        labelBg.setStyle(Paint.Style.FILL);
+        labelBg.setColor(0xCC000000);
     }
 
     public void setArrows(List<Arrow> a) {
@@ -45,7 +60,21 @@ public class ArrowOverlayView extends View {
         postInvalidate();
     }
 
+    public void setBoardBounds(Rect r) {
+        boardBounds = r;
+        postInvalidate();
+    }
+
+    public void clearAll() {
+        arrows.clear();
+        boardBounds = null;
+        postInvalidate();
+    }
+
     @Override protected void onDraw(Canvas c) {
+        if (boardBounds != null) {
+            c.drawRect(boardBounds, frame);
+        }
         for (Arrow a : arrows) {
             shadow.setStrokeWidth(a.widthPx + 6f);
             stroke.setStrokeWidth(a.widthPx);
@@ -56,7 +85,7 @@ public class ArrowOverlayView extends View {
             c.drawLine(a.sx, a.sy, a.ex, a.ey, stroke);
 
             double ang = Math.atan2(a.ey - a.sy, a.ex - a.sx);
-            float headLen = a.widthPx * 2.5f;
+            float headLen = a.widthPx * 2.6f;
             float wing = (float) (Math.PI / 7);
             float lx = a.ex - (float) (Math.cos(ang - wing) * headLen);
             float ly = a.ey - (float) (Math.sin(ang - wing) * headLen);
@@ -68,6 +97,14 @@ public class ArrowOverlayView extends View {
             headPath.lineTo(rx, ry);
             headPath.close();
             c.drawPath(headPath, head);
+
+            if (a.label != null) {
+                float tx = (a.sx + a.ex) / 2f;
+                float ty = (a.sy + a.ey) / 2f;
+                float w = label.measureText(a.label) + 16f;
+                c.drawRoundRect(tx - w / 2, ty - 22, tx + w / 2, ty + 12, 8f, 8f, labelBg);
+                c.drawText(a.label, tx - (w - 16f) / 2f, ty + 6f, label);
+            }
         }
     }
 }

@@ -2,13 +2,14 @@ package com.opencheps.ui;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.media.projection.MediaProjectionManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.widget.Button;
-import android.widget.RadioGroup;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -19,12 +20,13 @@ import androidx.core.app.ActivityCompat;
 
 import com.opencheps.R;
 import com.opencheps.capture.ScreenCaptureService;
+import com.opencheps.util.Prefs;
 
 public class MainActivity extends AppCompatActivity {
 
-    private Button btnOverlay, btnCapture, btnStart, btnStop;
-    private RadioGroup sideGroup;
-    private TextView status, log;
+    private Button btnOverlay, btnStart, btnStop;
+    private TextView statusTv, thinkTv, multiPvTv;
+    private SeekBar thinkBar, multiPvBar;
     private MediaProjectionManager mpm;
 
     private final ActivityResultLauncher<Intent> projectionLauncher =
@@ -33,13 +35,12 @@ public class MainActivity extends AppCompatActivity {
                     Intent svc = new Intent(this, ScreenCaptureService.class);
                     svc.putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, r.getResultCode());
                     svc.putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, r.getData());
-                    svc.putExtra(ScreenCaptureService.EXTRA_SIDE,
-                            sideGroup.getCheckedRadioButtonId() == R.id.sideBlack ? "b" : "w");
                     if (Build.VERSION.SDK_INT >= 26) startForegroundService(svc);
                     else startService(svc);
-                    status.setText(R.string.status_running);
+                    statusTv.setText(R.string.status_running);
                     btnStop.setEnabled(true);
                     btnStart.setEnabled(false);
+                    moveAppToBackground();
                 } else {
                     toast("Screen capture not granted");
                 }
@@ -51,22 +52,51 @@ public class MainActivity extends AppCompatActivity {
         mpm = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
 
         btnOverlay = findViewById(R.id.btnOverlay);
-        btnCapture = findViewById(R.id.btnCapture);
         btnStart   = findViewById(R.id.btnStart);
         btnStop    = findViewById(R.id.btnStop);
-        sideGroup  = findViewById(R.id.sideGroup);
-        status     = findViewById(R.id.status);
-        log        = findViewById(R.id.log);
+        statusTv   = findViewById(R.id.status);
+        thinkTv    = findViewById(R.id.thinkLabel);
+        multiPvTv  = findViewById(R.id.multiPvLabel);
+        thinkBar   = findViewById(R.id.thinkBar);
+        multiPvBar = findViewById(R.id.multiPvBar);
+
+        SharedPreferences sp = Prefs.get(this);
+        int think = sp.getInt(Prefs.KEY_THINK_MS, 700);
+        int pv    = sp.getInt(Prefs.KEY_MULTIPV, 3);
+        thinkBar.setMax(2400);
+        thinkBar.setProgress(think);
+        multiPvBar.setMax(2);
+        multiPvBar.setProgress(pv - 1);
+        thinkTv.setText("Think time: " + think + " ms");
+        multiPvTv.setText("Candidate moves: " + pv);
+
+        thinkBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar b, int v, boolean u) {
+                int t = Math.max(200, v);
+                thinkTv.setText("Think time: " + t + " ms");
+                sp.edit().putInt(Prefs.KEY_THINK_MS, t).apply();
+            }
+            @Override public void onStartTrackingTouch(SeekBar b) {}
+            @Override public void onStopTrackingTouch(SeekBar b) {}
+        });
+        multiPvBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar b, int v, boolean u) {
+                int n = v + 1;
+                multiPvTv.setText("Candidate moves: " + n);
+                sp.edit().putInt(Prefs.KEY_MULTIPV, n).apply();
+            }
+            @Override public void onStartTrackingTouch(SeekBar b) {}
+            @Override public void onStopTrackingTouch(SeekBar b) {}
+        });
 
         btnOverlay.setOnClickListener(v -> requestOverlay());
-        btnCapture.setOnClickListener(v -> projectionLauncher.launch(mpm.createScreenCaptureIntent()));
         btnStart.setOnClickListener(v -> {
-            if (!Settings.canDrawOverlays(this)) { toast("Grant overlay first"); return; }
+            if (!Settings.canDrawOverlays(this)) { toast("Grant overlay permission first"); return; }
             projectionLauncher.launch(mpm.createScreenCaptureIntent());
         });
         btnStop.setOnClickListener(v -> {
             stopService(new Intent(this, ScreenCaptureService.class));
-            status.setText(R.string.status_idle);
+            statusTv.setText(R.string.status_idle);
             btnStop.setEnabled(false);
             btnStart.setEnabled(true);
         });
@@ -81,10 +111,14 @@ public class MainActivity extends AppCompatActivity {
         super.onResume();
         boolean overlay = Settings.canDrawOverlays(this);
         btnOverlay.setEnabled(!overlay);
-        btnOverlay.setText(overlay ? "Overlay granted" : getString(R.string.grant_overlay));
-        log.setText("Drop stockfish binary at app/src/main/assets/stockfish (arm64-v8a, PIE, UCI). "
-                + "Optional: drop a 32x32 RGB TFLite piece classifier at "
-                + "app/src/main/assets/piece_classifier.tflite for true FENs.");
+        btnOverlay.setText(overlay
+                ? getString(R.string.overlay_granted)
+                : getString(R.string.grant_overlay));
+        btnStart.setEnabled(overlay);
+    }
+
+    private void moveAppToBackground() {
+        moveTaskToBack(true);
     }
 
     private void requestOverlay() {
