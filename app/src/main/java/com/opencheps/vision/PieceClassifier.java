@@ -24,11 +24,12 @@ public class PieceClassifier {
     private SquareSampler.Sample[] previousFrame;
     private char[] previousLabels;
     private char[] labels;
-    private float[] emptyLightRGB, emptyDarkRGB;
-    private float emptyColorTolerance;
+    private float emptyEdgeMax;
+    private float occupiedEdgeMin;
+    private float pieceColorThreshold;
+    private float frameChangeThreshold;
     private float whitePieceLumAvg;
     private float blackPieceLumAvg;
-    private float squareChangeThreshold;
     private boolean trained;
     private Side bootstrapSide;
 
@@ -40,68 +41,55 @@ public class PieceClassifier {
         SquareSampler.Sample[] samples = sampleAll(bmp, board);
         if (samples == null) return false;
 
-        float[] lightRGB = new float[3];
-        float[] darkRGB  = new float[3];
-        int lc = 0, dc = 0;
+        float maxEmptyEdge = 0;
+        int emptyCount = 0;
         for (int r = 2; r <= 5; r++) for (int f = 0; f < 8; f++) {
-            SquareSampler.Sample s = samples[r * 8 + f];
-            if (((r + f) & 1) == 0) {
-                lightRGB[0] += s.meanR; lightRGB[1] += s.meanG; lightRGB[2] += s.meanB; lc++;
-            } else {
-                darkRGB[0]  += s.meanR; darkRGB[1]  += s.meanG; darkRGB[2]  += s.meanB; dc++;
+            float e = samples[r * 8 + f].edgeEnergy;
+            if (e > maxEmptyEdge) maxEmptyEdge = e;
+            emptyCount++;
+        }
+
+        float minOccupiedEdge = Float.MAX_VALUE;
+        int occCount = 0;
+        for (int r = 0; r < 8; r++) {
+            if (r >= 2 && r <= 5) continue;
+            for (int f = 0; f < 8; f++) {
+                float e = samples[r * 8 + f].edgeEnergy;
+                if (e < minOccupiedEdge) minOccupiedEdge = e;
+                occCount++;
             }
         }
-        if (lc == 0 || dc == 0) return false;
-        for (int i = 0; i < 3; i++) { lightRGB[i] /= lc; darkRGB[i] /= dc; }
 
-        float maxEmptyDist = 0;
-        for (int r = 2; r <= 5; r++) for (int f = 0; f < 8; f++) {
-            float[] ref = ((r + f) & 1) == 0 ? lightRGB : darkRGB;
-            float dist = sqDist(samples[r * 8 + f], ref);
-            maxEmptyDist = Math.max(maxEmptyDist, dist);
+        if (minOccupiedEdge < maxEmptyEdge * 1.5f) {
+            Log.i(TAG, "bootstrap reject: minOccupied=" + minOccupiedEdge
+                    + " maxEmpty=" + maxEmptyEdge);
+            return false;
         }
-        float tolerance = Math.max(0.0015f, maxEmptyDist * 3.5f + 0.001f);
 
-        int filledTop = 0, filledBot = 0, emptyMid = 0;
-        float topLum = 0, botLum = 0; int tn = 0, bn = 0;
+        emptyEdgeMax = maxEmptyEdge;
+        occupiedEdgeMin = minOccupiedEdge;
+        pieceColorThreshold = (maxEmptyEdge + minOccupiedEdge) * 0.5f;
+
+        float topLumSum = 0, botLumSum = 0;
+        int topN = 0, botN = 0;
         for (int f = 0; f < 8; f++) {
             for (int r : new int[]{0, 1}) {
-                float[] ref = ((r + f) & 1) == 0 ? lightRGB : darkRGB;
-                if (sqDist(samples[r * 8 + f], ref) > tolerance) {
-                    filledTop++;
-                    topLum += samples[r * 8 + f].meanLum; tn++;
-                }
+                topLumSum += samples[r * 8 + f].meanLum;
+                topN++;
             }
             for (int r : new int[]{6, 7}) {
-                float[] ref = ((r + f) & 1) == 0 ? lightRGB : darkRGB;
-                if (sqDist(samples[r * 8 + f], ref) > tolerance) {
-                    filledBot++;
-                    botLum += samples[r * 8 + f].meanLum; bn++;
-                }
+                botLumSum += samples[r * 8 + f].meanLum;
+                botN++;
             }
         }
-        for (int r = 2; r <= 5; r++) for (int f = 0; f < 8; f++) {
-            float[] ref = ((r + f) & 1) == 0 ? lightRGB : darkRGB;
-            if (sqDist(samples[r * 8 + f], ref) <= tolerance) emptyMid++;
-        }
-
-        Log.i(TAG, "bootstrap: filledTop=" + filledTop + " filledBot=" + filledBot
-                + " emptyMid=" + emptyMid + " maxEmptyDist=" + maxEmptyDist
-                + " tol=" + tolerance);
-
-        if (filledTop < 12 || filledBot < 12 || emptyMid < 24) return false;
-        if (tn == 0 || bn == 0) return false;
-
-        topLum /= tn; botLum /= bn;
-        Side side = botLum > topLum ? Side.WHITE : Side.BLACK;
+        if (topN == 0 || botN == 0) return false;
+        float topAvg = topLumSum / topN;
+        float botAvg = botLumSum / botN;
+        Side side = botAvg > topAvg ? Side.WHITE : Side.BLACK;
 
         char[] map = side == Side.WHITE ? START_WHITE_POV : flipLabels(START_WHITE_POV);
-
         templates = samples;
         labels = map;
-        emptyLightRGB = lightRGB;
-        emptyDarkRGB  = darkRGB;
-        emptyColorTolerance = tolerance;
         bootstrapSide = side;
 
         float whiteSum = 0; int whiteN = 0;
@@ -109,39 +97,35 @@ public class PieceClassifier {
         for (int i = 0; i < 64; i++) {
             char c = labels[i];
             if (c == '.') continue;
-            float pieceLum = pieceLuminanceDelta(samples[i], i);
-            if (Character.isUpperCase(c)) { whiteSum += pieceLum; whiteN++; }
-            else                          { blackSum += pieceLum; blackN++; }
+            float lum = samples[i].meanLum;
+            if (Character.isUpperCase(c)) { whiteSum += lum; whiteN++; }
+            else                          { blackSum += lum; blackN++; }
         }
-        whitePieceLumAvg = whiteN > 0 ? whiteSum / whiteN : 0.3f;
-        blackPieceLumAvg = blackN > 0 ? blackSum / blackN : -0.3f;
-
-        float minPieceToEmpty = Float.MAX_VALUE;
-        for (int i = 0; i < 64; i++) {
-            if (labels[i] == '.') continue;
-            boolean light = (((i / 8) + (i % 8)) & 1) == 0;
-            for (int j = 0; j < 64; j++) {
-                if (labels[j] != '.') continue;
-                boolean jLight = (((j / 8) + (j % 8)) & 1) == 0;
-                if (jLight != light) continue;
-                float d = SquareSampler.distance(samples[i].feature, samples[j].feature);
-                if (d < minPieceToEmpty) minPieceToEmpty = d;
-            }
-        }
-        if (minPieceToEmpty == Float.MAX_VALUE) minPieceToEmpty = 20f;
-        squareChangeThreshold = Math.max(2f, minPieceToEmpty * 0.25f);
+        whitePieceLumAvg = whiteN > 0 ? whiteSum / whiteN : 0.7f;
+        blackPieceLumAvg = blackN > 0 ? blackSum / blackN : 0.3f;
 
         previousFrame = samples;
-        char[][] base = new char[8][8];
-        for (int r=0;r<8;r++) for (int f=0;f<8;f++) base[r][f] = labels[r*8+f];
         previousLabels = new char[64];
-        for (int i=0;i<64;i++) previousLabels[i] = labels[i];
+        for (int i = 0; i < 64; i++) previousLabels[i] = labels[i];
+
+        float maxBootstrapNoise = 0;
+        for (int i = 0; i < 64; i++) {
+            if (labels[i] != '.') continue;
+            for (int j = i + 1; j < 64; j++) {
+                if (labels[j] != '.') continue;
+                if ((((i/8)+(i%8))&1) != (((j/8)+(j%8))&1)) continue;
+                float d = SquareSampler.lumDistance(samples[i].feature, samples[j].feature);
+                if (d > maxBootstrapNoise) maxBootstrapNoise = d;
+            }
+        }
+        frameChangeThreshold = Math.max(0.3f, maxBootstrapNoise * 2.0f + 0.1f);
 
         trained = true;
         Log.i(TAG, "BOOTSTRAPPED side=" + side
-                + " whiteDelta=" + whitePieceLumAvg
-                + " blackDelta=" + blackPieceLumAvg
-                + " changeThr=" + squareChangeThreshold);
+                + " emptyMax=" + maxEmptyEdge
+                + " occMin=" + minOccupiedEdge
+                + " thr=" + pieceColorThreshold
+                + " frameChangeThr=" + frameChangeThreshold);
         return true;
     }
 
@@ -154,33 +138,36 @@ public class PieceClassifier {
         for (int r = 0; r < 8; r++) {
             for (int f = 0; f < 8; f++) {
                 int idx = r * 8 + f;
-                float frameDelta = previousFrame == null
-                        ? Float.MAX_VALUE
-                        : SquareSampler.distance(samples[idx].feature, previousFrame[idx].feature);
-                if (frameDelta < squareChangeThreshold && previousLabels != null) {
-                    grid[r][f] = previousLabels[idx];
-                } else {
-                    grid[r][f] = nearest(samples[idx], r, f);
+                if (previousFrame != null && previousLabels != null) {
+                    float fd = SquareSampler.lumDistance(
+                            samples[idx].feature, previousFrame[idx].feature);
+                    if (fd < frameChangeThreshold) {
+                        grid[r][f] = previousLabels[idx];
+                        continue;
+                    }
                 }
+                grid[r][f] = classifyOne(samples[idx], r, f);
             }
         }
         return grid;
     }
 
-    public synchronized void commitPrevious(char[][] confirmedGrid, Bitmap bmp, BoardDetector.Board board) {
-        if (!trained || confirmedGrid == null) return;
+    public synchronized void commitConfirmed(char[][] grid, Bitmap bmp, BoardDetector.Board board) {
+        if (!trained || grid == null) return;
         SquareSampler.Sample[] samples = sampleAll(bmp, board);
         if (samples == null) return;
         previousFrame = samples;
         if (previousLabels == null) previousLabels = new char[64];
-        for (int r=0;r<8;r++) for (int f=0;f<8;f++) {
-            previousLabels[r*8+f] = confirmedGrid[r][f] == 0 ? '.' : confirmedGrid[r][f];
+        for (int r = 0; r < 8; r++) {
+            for (int f = 0; f < 8; f++) {
+                previousLabels[r * 8 + f] = grid[r][f] == 0 ? '.' : grid[r][f];
+            }
         }
     }
 
     private SquareSampler.Sample[] sampleAll(Bitmap bmp, BoardDetector.Board board) {
         if (board.square < 8) return null;
-        int rad = Math.max(4, (int) (board.square * 0.28f));
+        int rad = Math.max(4, (int) (board.square * 0.32f));
         SquareSampler.Sample[] samples = new SquareSampler.Sample[64];
         for (int r = 0; r < 8; r++) {
             for (int f = 0; f < 8; f++) {
@@ -200,31 +187,14 @@ public class PieceClassifier {
         return o;
     }
 
-    private float sqDist(SquareSampler.Sample s, float[] ref) {
-        float dr = s.meanR - ref[0];
-        float dg = s.meanG - ref[1];
-        float db = s.meanB - ref[2];
-        return dr * dr + dg * dg + db * db;
-    }
+    private char classifyOne(SquareSampler.Sample s, int r, int f) {
+        if (s.edgeEnergy < pieceColorThreshold) return '.';
 
-    private float pieceLuminanceDelta(SquareSampler.Sample s, int squareIdx) {
-        boolean light = (((squareIdx / 8) + (squareIdx % 8)) & 1) == 0;
-        float bgLum = light
-                ? 0.299f * emptyLightRGB[0] + 0.587f * emptyLightRGB[1] + 0.114f * emptyLightRGB[2]
-                : 0.299f * emptyDarkRGB[0]  + 0.587f * emptyDarkRGB[1]  + 0.114f * emptyDarkRGB[2];
-        return s.meanLum - bgLum;
-    }
+        float distWhite = Math.abs(s.meanLum - whitePieceLumAvg);
+        float distBlack = Math.abs(s.meanLum - blackPieceLumAvg);
+        boolean isWhitePiece = distWhite < distBlack;
 
-    private char nearest(SquareSampler.Sample s, int r, int f) {
         boolean light = ((r + f) & 1) == 0;
-        float[] ref = light ? emptyLightRGB : emptyDarkRGB;
-        if (sqDist(s, ref) <= emptyColorTolerance) return '.';
-
-        float delta = pieceLuminanceDelta(s, r * 8 + f);
-        float distToWhite = Math.abs(delta - whitePieceLumAvg);
-        float distToBlack = Math.abs(delta - blackPieceLumAvg);
-        boolean isWhitePiece = distToWhite < distToBlack;
-
         float best = Float.MAX_VALUE;
         char bestC = isWhitePiece ? 'P' : 'p';
         for (int i = 0; i < templates.length; i++) {
@@ -233,7 +203,7 @@ public class PieceClassifier {
             if (Character.isUpperCase(tc) != isWhitePiece) continue;
             boolean tplLight = (((i / 8) + (i % 8)) & 1) == 0;
             if (tplLight != light) continue;
-            float d = SquareSampler.distance(s.feature, templates[i].feature);
+            float d = SquareSampler.lumDistance(s.feature, templates[i].feature);
             if (d < best) { best = d; bestC = tc; }
         }
         return bestC;

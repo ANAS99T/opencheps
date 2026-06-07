@@ -74,7 +74,15 @@ public class OverlayService extends Service {
         if (instance != null) instance.arrows.setBoardBounds(bounds);
     }
 
-    public static void clearOverlays() {
+    public static void setBoardFrameColor(int color) {
+        if (instance != null) instance.arrows.setBoardFrameColor(color);
+    }
+
+    public static void clearArrowsOnly() {
+        if (instance != null) instance.arrows.clearArrowsOnly();
+    }
+
+    public static void clearAll() {
         if (instance != null) instance.arrows.clearAll();
     }
 }

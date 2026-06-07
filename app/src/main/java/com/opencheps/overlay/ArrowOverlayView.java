@@ -28,6 +28,7 @@ public class ArrowOverlayView extends View {
 
     private final List<Arrow> arrows = new ArrayList<>();
     private Rect boardBounds;
+    private int boardFrameColor = 0x6600C853;
     private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint shadow = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint head   = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -45,10 +46,9 @@ public class ArrowOverlayView extends View {
         shadow.setColor(0x99000000);
         head.setStyle(Paint.Style.FILL);
         frame.setStyle(Paint.Style.STROKE);
-        frame.setStrokeWidth(4f);
-        frame.setColor(0x6600C853);
+        frame.setStrokeWidth(5f);
         label.setColor(0xFFFFFFFF);
-        label.setTextSize(28f);
+        label.setTextSize(30f);
         label.setFakeBoldText(true);
         labelBg.setStyle(Paint.Style.FILL);
         labelBg.setColor(0xCC000000);
@@ -65,6 +65,16 @@ public class ArrowOverlayView extends View {
         postInvalidate();
     }
 
+    public void setBoardFrameColor(int c) {
+        boardFrameColor = c;
+        postInvalidate();
+    }
+
+    public void clearArrowsOnly() {
+        arrows.clear();
+        postInvalidate();
+    }
+
     public void clearAll() {
         arrows.clear();
         boardBounds = null;
@@ -73,6 +83,7 @@ public class ArrowOverlayView extends View {
 
     @Override protected void onDraw(Canvas c) {
         if (boardBounds != null) {
+            frame.setColor(boardFrameColor);
             c.drawRect(boardBounds, frame);
         }
         for (Arrow a : arrows) {
@@ -101,9 +112,9 @@ public class ArrowOverlayView extends View {
             if (a.label != null) {
                 float tx = (a.sx + a.ex) / 2f;
                 float ty = (a.sy + a.ey) / 2f;
-                float w = label.measureText(a.label) + 16f;
-                c.drawRoundRect(tx - w / 2, ty - 22, tx + w / 2, ty + 12, 8f, 8f, labelBg);
-                c.drawText(a.label, tx - (w - 16f) / 2f, ty + 6f, label);
+                float w = label.measureText(a.label) + 18f;
+                c.drawRoundRect(tx - w / 2, ty - 24, tx + w / 2, ty + 14, 10f, 10f, labelBg);
+                c.drawText(a.label, tx - (w - 18f) / 2f, ty + 8f, label);
             }
         }
     }
