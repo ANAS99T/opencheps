@@ -21,11 +21,14 @@ public class PieceClassifier {
     };
 
     private SquareSampler.Sample[] templates;
+    private SquareSampler.Sample[] previousFrame;
+    private char[] previousLabels;
     private char[] labels;
     private float[] emptyLightRGB, emptyDarkRGB;
     private float emptyColorTolerance;
     private float whitePieceLumAvg;
     private float blackPieceLumAvg;
+    private float squareChangeThreshold;
     private boolean trained;
     private Side bootstrapSide;
 
@@ -113,11 +116,32 @@ public class PieceClassifier {
         whitePieceLumAvg = whiteN > 0 ? whiteSum / whiteN : 0.3f;
         blackPieceLumAvg = blackN > 0 ? blackSum / blackN : -0.3f;
 
+        float minPieceToEmpty = Float.MAX_VALUE;
+        for (int i = 0; i < 64; i++) {
+            if (labels[i] == '.') continue;
+            boolean light = (((i / 8) + (i % 8)) & 1) == 0;
+            for (int j = 0; j < 64; j++) {
+                if (labels[j] != '.') continue;
+                boolean jLight = (((j / 8) + (j % 8)) & 1) == 0;
+                if (jLight != light) continue;
+                float d = SquareSampler.distance(samples[i].feature, samples[j].feature);
+                if (d < minPieceToEmpty) minPieceToEmpty = d;
+            }
+        }
+        if (minPieceToEmpty == Float.MAX_VALUE) minPieceToEmpty = 20f;
+        squareChangeThreshold = Math.max(2f, minPieceToEmpty * 0.25f);
+
+        previousFrame = samples;
+        char[][] base = new char[8][8];
+        for (int r=0;r<8;r++) for (int f=0;f<8;f++) base[r][f] = labels[r*8+f];
+        previousLabels = new char[64];
+        for (int i=0;i<64;i++) previousLabels[i] = labels[i];
+
         trained = true;
         Log.i(TAG, "BOOTSTRAPPED side=" + side
                 + " whiteDelta=" + whitePieceLumAvg
                 + " blackDelta=" + blackPieceLumAvg
-                + " tol=" + tolerance);
+                + " changeThr=" + squareChangeThreshold);
         return true;
     }
 
@@ -129,10 +153,29 @@ public class PieceClassifier {
         char[][] grid = new char[8][8];
         for (int r = 0; r < 8; r++) {
             for (int f = 0; f < 8; f++) {
-                grid[r][f] = nearest(samples[r * 8 + f], r, f);
+                int idx = r * 8 + f;
+                float frameDelta = previousFrame == null
+                        ? Float.MAX_VALUE
+                        : SquareSampler.distance(samples[idx].feature, previousFrame[idx].feature);
+                if (frameDelta < squareChangeThreshold && previousLabels != null) {
+                    grid[r][f] = previousLabels[idx];
+                } else {
+                    grid[r][f] = nearest(samples[idx], r, f);
+                }
             }
         }
         return grid;
+    }
+
+    public synchronized void commitPrevious(char[][] confirmedGrid, Bitmap bmp, BoardDetector.Board board) {
+        if (!trained || confirmedGrid == null) return;
+        SquareSampler.Sample[] samples = sampleAll(bmp, board);
+        if (samples == null) return;
+        previousFrame = samples;
+        if (previousLabels == null) previousLabels = new char[64];
+        for (int r=0;r<8;r++) for (int f=0;f<8;f++) {
+            previousLabels[r*8+f] = confirmedGrid[r][f] == 0 ? '.' : confirmedGrid[r][f];
+        }
     }
 
     private SquareSampler.Sample[] sampleAll(Bitmap bmp, BoardDetector.Board board) {
@@ -199,6 +242,8 @@ public class PieceClassifier {
     public synchronized void reset() {
         templates = null;
         labels = null;
+        previousFrame = null;
+        previousLabels = null;
         trained = false;
         bootstrapSide = null;
     }

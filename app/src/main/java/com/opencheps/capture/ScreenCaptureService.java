@@ -36,10 +36,12 @@ import com.opencheps.util.Prefs;
 import com.opencheps.util.Side;
 import com.opencheps.vision.BoardDetector;
 import com.opencheps.vision.FenBuilder;
+import com.opencheps.vision.MoveAnalyzer;
 import com.opencheps.vision.PieceClassifier;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 public class ScreenCaptureService extends Service {
@@ -54,7 +56,8 @@ public class ScreenCaptureService extends Service {
 
     private static final int[]   ARROW_COLORS = { 0xFF00C853, 0xFFFFB300, 0xFF29B6F6 };
     private static final float[] ARROW_WIDTHS = { 18f, 13f, 10f };
-    private static final long    SAMPLE_PERIOD_MS = 700;
+    private static final long    SAMPLE_PERIOD_MS = 600;
+    private static final int     STABLE_FRAMES_REQUIRED = 2;
 
     private MediaProjection projection;
     private VirtualDisplay   virtualDisplay;
@@ -73,11 +76,14 @@ public class ScreenCaptureService extends Service {
     private volatile boolean paused = false;
 
     private Side userSide = Side.WHITE;
-    private String lastClassifiedFen = "";
-    private int lastMaterial = Integer.MIN_VALUE;
-    private Side lastInferredStm = null;
+
+    private char[][] confirmedGrid;
+    private char[][] pendingGrid;
+    private int pendingStableCount;
+    private Side observedStm = Side.WHITE;
+    private String lastEngineFen = "";
     private int noBoardCount = 0;
-    private int sameFenCount = 0;
+    private int unknownMoveCount = 0;
 
     @Nullable @Override public IBinder onBind(Intent i) { return null; }
 
@@ -145,50 +151,79 @@ public class ScreenCaptureService extends Service {
                             OverlayService.clearOverlays();
                             panelStatus("Paused");
                         } else {
-                            lastClassifiedFen = "";
+                            lastEngineFen = "";
+                            pendingGrid = null;
+                            pendingStableCount = 0;
+                            if (worker != null) worker.post(() -> drainReader(true));
                             panelStatus("Resumed");
                         }
                     }
                     @Override public void onStop() { stopSelf(); }
                     @Override public void onRecalibrate() {
                         classifier.reset();
-                        lastClassifiedFen = "";
-                        lastMaterial = Integer.MIN_VALUE;
-                        lastInferredStm = null;
-                        panelStatus("Re-calibrating — show starting position");
+                        resetGameState();
+                        panelStatus("Recalibrating — show starting position");
                     }
                     @Override public void onSideChange(Side newSide) {
                         userSide = newSide;
+                        observedStm = newSide;
                         Prefs.setUserSide(getApplicationContext(),
                                 newSide == Side.BLACK ? "b" : "w");
-                        classifier.reset();
-                        lastClassifiedFen = "";
-                        lastMaterial = Integer.MIN_VALUE;
-                        lastInferredStm = null;
-                        OverlayService.clearOverlays();
-                        panelStatus("Switched to " + newSide + " — recalibrating");
+                        if (classifier.isTrained() && classifier.bootstrapSide() != newSide) {
+                            classifier.reset();
+                            resetGameState();
+                            panelStatus("Switched to " + newSide + " — recalibrate");
+                        } else {
+                            lastEngineFen = "";
+                            panelStatus("Now playing " + newSide);
+                        }
                     }
                 });
             }
         }, 400);
     }
 
+    private void resetGameState() {
+        confirmedGrid = null;
+        pendingGrid = null;
+        pendingStableCount = 0;
+        lastEngineFen = "";
+        observedStm = Side.WHITE;
+        unknownMoveCount = 0;
+    }
+
     private final Runnable sampleLoop = new Runnable() {
         @Override public void run() {
-            try { if (!paused) sampleOnce(); }
+            try { if (!paused) sampleOnce(); else drainReader(false); }
             catch (Throwable t) { Log.e(TAG, "sample error", t); }
             if (worker != null) worker.postDelayed(this, SAMPLE_PERIOD_MS);
         }
     };
 
+    private void drainReader(boolean keepLast) {
+        if (reader == null) return;
+        Image last = null;
+        while (true) {
+            Image im;
+            try { im = reader.acquireNextImage(); }
+            catch (Exception e) { break; }
+            if (im == null) break;
+            if (last != null) last.close();
+            last = im;
+        }
+        if (last != null) {
+            if (!keepLast) last.close();
+            else {
+                try { last.close(); } catch (Exception ignored) {}
+            }
+        }
+    }
+
     private void sampleOnce() {
         if (busy || reader == null) return;
-        Image img = null;
-        try {
-            img = reader.acquireLatestImage();
-        } catch (Exception e) {
-            return;
-        }
+        Image img;
+        try { img = reader.acquireLatestImage(); }
+        catch (Exception e) { return; }
         if (img == null) return;
         busy = true;
         Bitmap bmp = null;
@@ -207,9 +242,8 @@ public class ScreenCaptureService extends Service {
                 return;
             }
             noBoardCount = 0;
-
-            Rect screenBoardBounds = boardBoundsOnScreen(board);
-            OverlayService.setBoardBounds(screenBoardBounds);
+            Rect screenBounds = boardBoundsOnScreen(board);
+            OverlayService.setBoardBounds(screenBounds);
 
             if (!engineReady) {
                 panelStatus("Board found • waiting for engine");
@@ -219,68 +253,88 @@ public class ScreenCaptureService extends Service {
             if (!classifier.isTrained()) {
                 boolean ok = classifier.tryBootstrap(bmp, board);
                 if (!ok) {
-                    panelStatus("Board found — show STARTING position to calibrate");
+                    panelStatus("Show STARTING position to calibrate");
                     return;
                 }
-                Side detectedPov = classifier.bootstrapSide();
-                if (detectedPov != userSide) {
+                Side detected = classifier.bootstrapSide();
+                if (detected != userSide) {
                     classifier.reset();
-                    panelStatus("Detected " + detectedPov + " POV but you set "
-                            + userSide + " — tap recalibrate after fixing");
+                    panelStatus("Board shows " + detected + " at bottom — switch side or flip");
                     return;
                 }
+                resetGameState();
+                confirmedGrid = startingGridFor(userSide);
+                observedStm = Side.WHITE;
                 panelStatus("Calibrated • you play " + userSide);
+                if (userSide == Side.WHITE) maybeQuery(board);
+                return;
             }
 
             char[][] grid = classifier.classifyBoard(bmp, board);
             if (grid == null) return;
 
-            int material = FenBuilder.materialDiff(grid);
-            Side inferredStm = inferStm(material);
+            grid = repairWithMoveConsistency(confirmedGrid, grid);
 
-            boolean userTurn = inferredStm == userSide;
-
-            String fenForUser = FenBuilder.build(grid, classifier.bootstrapSide(), userSide);
-            if (fenForUser == null) {
-                panelStatus("Position invalid — waiting for clean frame");
+            if (!gridsEqual(grid, pendingGrid)) {
+                pendingGrid = grid;
+                pendingStableCount = 1;
+                panelStatus("Stabilising…");
                 return;
             }
-            if (fenForUser.equals(lastClassifiedFen)) {
-                sameFenCount++;
+            pendingStableCount++;
+            if (pendingStableCount < STABLE_FRAMES_REQUIRED) {
+                panelStatus("Stabilising… (" + pendingStableCount + "/" + STABLE_FRAMES_REQUIRED + ")");
                 return;
             }
-            sameFenCount = 0;
-            lastClassifiedFen = fenForUser;
-            lastMaterial = material;
-            lastInferredStm = inferredStm;
 
-            if (!userTurn) {
+            if (gridsEqual(grid, confirmedGrid)) {
+                classifier.commitPrevious(confirmedGrid, bmp, board);
+                panelStatus(observedStm + "'s turn");
+                if (observedStm == userSide && !lastEngineFen.isEmpty()) {
+                    return;
+                }
+                if (observedStm == userSide) {
+                    maybeQuery(board);
+                } else {
+                    OverlayService.clearOverlays();
+                    OverlayService.setBoardBounds(screenBounds);
+                }
+                return;
+            }
+
+            MoveAnalyzer.Result m = MoveAnalyzer.analyze(confirmedGrid, grid);
+            Log.i(TAG, "Position change: kind=" + m.kind + " mover=" + m.mover
+                    + " changes=" + m.changeCount);
+
+            if (m.kind == MoveAnalyzer.Kind.UNKNOWN || m.mover == null) {
+                unknownMoveCount++;
+                panelStatus("Unclear change (" + m.changeCount + " sq) — waiting");
+                if (unknownMoveCount > 4) {
+                    confirmedGrid = grid;
+                    classifier.commitPrevious(confirmedGrid, bmp, board);
+                    observedStm = userSide;
+                    unknownMoveCount = 0;
+                    lastEngineFen = "";
+                    panelStatus("Forced re-sync");
+                    if (observedStm == userSide) maybeQuery(board);
+                }
+                return;
+            }
+            unknownMoveCount = 0;
+
+            confirmedGrid = grid;
+            classifier.commitPrevious(confirmedGrid, bmp, board);
+            observedStm = m.mover == Side.WHITE ? Side.BLACK : Side.WHITE;
+            lastEngineFen = "";
+
+            if (observedStm == userSide) {
+                maybeQuery(board);
+            } else {
                 OverlayService.clearOverlays();
-                OverlayService.setBoardBounds(screenBoardBounds);
-                panelStatus(opponentName() + "'s turn — waiting");
+                OverlayService.setBoardBounds(screenBounds);
+                panelStatus(observedStm + "'s turn — waiting");
                 panelEval("");
-                return;
             }
-
-            int think    = Prefs.thinkMs(getApplicationContext());
-            int multiPv  = Math.max(1, Math.min(3, Prefs.multiPv(getApplicationContext())));
-
-            panelStatus("Thinking " + think + " ms…");
-            long t0 = System.currentTimeMillis();
-            List<StockfishEngine.Pv> pvs = engine.topMoves(fenForUser, think, multiPv);
-            long dt = System.currentTimeMillis() - t0;
-            if (pvs.isEmpty()) {
-                panelStatus("Engine: no legal move");
-                return;
-            }
-
-            renderArrows(pvs, board);
-            StockfishEngine.Pv best = pvs.get(0);
-            String evalStr = best.mate
-                    ? "M" + Math.abs(plyToMate(best.cp))
-                    : String.format("%+.2f", best.cp / 100.0);
-            panelEval("YOU (" + userSide + ") play " + formatUci(best.uci) + "  " + evalStr);
-            panelStatus("Your move • depth ~" + dt + "ms");
         } catch (Exception e) {
             Log.w(TAG, "loop iter failed: " + e.getMessage(), e);
         } finally {
@@ -290,8 +344,114 @@ public class ScreenCaptureService extends Service {
         }
     }
 
-    private String opponentName() {
-        return userSide == Side.WHITE ? "Black" : "White";
+    private void maybeQuery(BoardDetector.Board board) {
+        if (confirmedGrid == null) return;
+        FenBuilder.Validation v = FenBuilder.validate(
+                classifier.bootstrapSide() == Side.BLACK
+                        ? FenBuilder.flip(confirmedGrid) : confirmedGrid);
+        if (!v.ok) {
+            panelStatus("Invalid position: " + v.reason);
+            OverlayService.clearOverlays();
+            OverlayService.setBoardBounds(boardBoundsOnScreen(board));
+            return;
+        }
+        String fen = FenBuilder.build(confirmedGrid, classifier.bootstrapSide(), userSide);
+        if (fen == null) {
+            panelStatus("FEN build failed");
+            return;
+        }
+        if (fen.equals(lastEngineFen)) return;
+        lastEngineFen = fen;
+
+        int think   = Prefs.thinkMs(getApplicationContext());
+        int multiPv = Math.max(1, Math.min(3, Prefs.multiPv(getApplicationContext())));
+        panelStatus("Thinking " + think + " ms…");
+        try {
+            long t0 = System.currentTimeMillis();
+            List<StockfishEngine.Pv> pvs = engine.topMoves(fen, think, multiPv);
+            long dt = System.currentTimeMillis() - t0;
+            if (pvs.isEmpty()) {
+                panelStatus("Engine: no legal move");
+                return;
+            }
+            renderArrows(pvs, board);
+            StockfishEngine.Pv best = pvs.get(0);
+            String evalStr = best.mate
+                    ? "M" + Math.abs(plyToMate(best.cp))
+                    : String.format("%+.2f", best.cp / 100.0);
+            panelEval("YOU (" + userSide + ") " + formatUci(best.uci) + "  " + evalStr);
+            panelStatus("Best move ready (" + dt + " ms)");
+        } catch (Exception e) {
+            Log.w(TAG, "engine query failed", e);
+            panelStatus("Engine query failed");
+        }
+    }
+
+    private boolean gridsEqual(char[][] a, char[][] b) {
+        if (a == null || b == null) return false;
+        for (int r = 0; r < 8; r++) {
+            if (!Arrays.equals(a[r], b[r])) return false;
+        }
+        return true;
+    }
+
+    private char[][] repairWithMoveConsistency(char[][] prev, char[][] curr) {
+        if (prev == null || curr == null) return curr;
+        char emptiedPiece = 0;
+        int emptiedCount = 0, filledCount = 0;
+        int[] filledPos = null;
+        for (int r = 0; r < 8; r++) {
+            for (int f = 0; f < 8; f++) {
+                char p = prev[r][f] == 0 ? '.' : prev[r][f];
+                char c = curr[r][f] == 0 ? '.' : curr[r][f];
+                if (p == c) continue;
+                if (p != '.' && c == '.') {
+                    if (emptiedCount == 0) emptiedPiece = p;
+                    emptiedCount++;
+                } else if (p == '.' && c != '.') {
+                    filledCount++;
+                    filledPos = new int[]{r, f};
+                } else {
+                    if (Character.isUpperCase(p) == Character.isUpperCase(c) && p != c) {
+                        if (emptiedCount == 0 && filledCount == 0) {
+                            curr[r][f] = p;
+                            return curr;
+                        }
+                    }
+                }
+            }
+        }
+        if (emptiedCount == 1 && filledCount == 1 && filledPos != null) {
+            char arrived = curr[filledPos[0]][filledPos[1]];
+            if (Character.isUpperCase(arrived) == Character.isUpperCase(emptiedPiece)
+                    && arrived != emptiedPiece) {
+                boolean isPromotion = Character.toLowerCase(emptiedPiece) == 'p'
+                        && (filledPos[0] == 0 || filledPos[0] == 7);
+                if (!isPromotion) {
+                    curr[filledPos[0]][filledPos[1]] = emptiedPiece;
+                }
+            }
+        }
+        return curr;
+    }
+
+    private char[][] startingGridFor(Side userSide) {
+        char[][] base = {
+            {'r','n','b','q','k','b','n','r'},
+            {'p','p','p','p','p','p','p','p'},
+            {'.','.','.','.','.','.','.','.'},
+            {'.','.','.','.','.','.','.','.'},
+            {'.','.','.','.','.','.','.','.'},
+            {'.','.','.','.','.','.','.','.'},
+            {'P','P','P','P','P','P','P','P'},
+            {'R','N','B','Q','K','B','N','R'},
+        };
+        if (userSide == Side.BLACK) {
+            char[][] o = new char[8][8];
+            for (int r=0;r<8;r++) for (int f=0;f<8;f++) o[r][f] = base[7-r][7-f];
+            return o;
+        }
+        return base;
     }
 
     private int plyToMate(int cp) {
@@ -302,13 +462,6 @@ public class ScreenCaptureService extends Service {
         if (uci == null || uci.length() < 4) return uci == null ? "?" : uci;
         return uci.substring(0, 2) + "→" + uci.substring(2, 4)
                 + (uci.length() > 4 ? "=" + Character.toUpperCase(uci.charAt(4)) : "");
-    }
-
-    private Side inferStm(int material) {
-        if (lastMaterial == Integer.MIN_VALUE) return Side.WHITE;
-        if (material < lastMaterial) return Side.WHITE;
-        if (material > lastMaterial) return Side.BLACK;
-        return lastInferredStm == Side.WHITE ? Side.BLACK : Side.WHITE;
     }
 
     private Rect boardBoundsOnScreen(BoardDetector.Board board) {
@@ -372,10 +525,9 @@ public class ScreenCaptureService extends Service {
         capToScreenY = (float) screenH / captureH;
 
         Log.i(TAG, "screen=" + screenW + "x" + screenH
-                + " capture=" + captureW + "x" + captureH
-                + " scale=" + capToScreenX);
+                + " capture=" + captureW + "x" + captureH);
 
-        reader = ImageReader.newInstance(captureW, captureH, PixelFormat.RGBA_8888, 2);
+        reader = ImageReader.newInstance(captureW, captureH, PixelFormat.RGBA_8888, 4);
         virtualDisplay = projection.createVirtualDisplay(
                 "OpenChepsVD", captureW, captureH, density,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
