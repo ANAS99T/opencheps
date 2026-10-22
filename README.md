@@ -163,3 +163,4 @@ app/src/main/
 ## License
 
 App code: MIT. Stockfish 18 binary: GPL-3.0 (license travels with the bundled binary).
+
